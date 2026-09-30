@@ -14,7 +14,6 @@ Railway/Fly.io per PRD §7).
 import json
 import os
 import time
-import traceback
 from datetime import datetime, timezone
 
 import psycopg
@@ -23,8 +22,10 @@ import requests
 import dub
 import ffmpeg_filters
 import ingest
+import log
 import plans
 import render
+import retention
 import transcribe
 import usage
 from validation import ValidationError
@@ -229,8 +230,8 @@ def run_render(conn, job, project) -> None:
                 cur.execute("UPDATE clips SET status = 'ready' WHERE id = %s", (clip["id"],))
             conn.commit()
             succeeded += 1
-        except Exception:
-            traceback.print_exc()
+        except Exception as exc:
+            log.error("render.clip_failed", exc, clip_id=clip["id"], project_id=project["id"])
             with conn.cursor() as cur:
                 cur.execute("UPDATE clips SET status = 'failed' WHERE id = %s", (clip["id"],))
             conn.commit()
@@ -290,8 +291,8 @@ def run_dub(conn, job, project) -> None:
             usage.record_dubbing_credits(conn, project["user_id"], project["id"], clip_minutes)
             char_count = sum(len(s["text"]) for s in segments)
             usage.record_job_cost(conn, job["id"], usage.estimate_tts_cost(char_count))
-        except Exception:
-            traceback.print_exc()
+        except Exception as exc:
+            log.error("dub.clip_failed", exc, clip_id=clip["id"], project_id=project["id"])
 
     if succeeded == 0:
         raise ValidationError("Dubbing failed for every clip.")
@@ -393,12 +394,16 @@ def process_job(conn, job):
         STAGE_HANDLERS[job["stage"]](conn, job, project)
         mark_done(conn, job, project)
     except Exception as exc:  # noqa: BLE001 - report any stage failure, retried via FR-38
-        traceback.print_exc()
+        log.error("job.stage_failed", exc, job_id=job["id"], project_id=project["id"], stage=job["stage"])
         mark_failed(conn, job, project, str(exc))
 
 
+RETENTION_SWEEP_INTERVAL_S = 60 * 60  # M8.4: once an hour is plenty
+
+
 def main():
-    print("Nabd worker started, polling for jobs every", POLL_INTERVAL_S, "s")
+    log.info("worker.started", poll_interval_s=POLL_INTERVAL_S)
+    last_retention_sweep = 0.0
     with psycopg.connect(DATABASE_URL, autocommit=False) as conn:
         while True:
             job = claim_next_job(conn)
@@ -406,6 +411,12 @@ def main():
                 process_job(conn, job)
             else:
                 time.sleep(POLL_INTERVAL_S)
+
+            if time.time() - last_retention_sweep >= RETENTION_SWEEP_INTERVAL_S:
+                removed = retention.sweep_old_source_files(ingest.STORAGE_DIR)
+                if removed:
+                    log.info("retention.swept", removed_count=len(removed))
+                last_retention_sweep = time.time()
 
 
 if __name__ == "__main__":

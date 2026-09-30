@@ -7,10 +7,31 @@ import { Button } from "@/components/ui/button";
 import {
   ALLOWED_VIDEO_TYPES,
   isYoutubeUrl,
+  validateDuration,
   validateFileMeta,
 } from "@/lib/video-validation";
 import { SUPPORTED_TARGET_LANGUAGES } from "@/lib/dubbing";
 import type { ProjectOptions } from "@/db/schema";
+
+// Edge case §11: "Very long source → reject before upload finishes (check
+// metadata client-side where possible)." Reads only the <video> element's
+// metadata (duration), not the full file — fast, no full decode/download.
+function readVideoDurationS(file: File): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    const url = URL.createObjectURL(file);
+    video.src = url;
+    video.onloadedmetadata = () => {
+      URL.revokeObjectURL(url);
+      resolve(video.duration);
+    };
+    video.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Could not read video metadata."));
+    };
+  });
+}
 
 // UI screen 4 (PRD §10) / §4 steps 2-3: upload or YouTube URL + options.
 export default function NewProjectPage() {
@@ -43,6 +64,17 @@ export default function NewProjectPage() {
       if (!check.ok) {
         setError(check.reason);
         return;
+      }
+      try {
+        const durationS = await readVideoDurationS(file);
+        const durationCheck = validateDuration(durationS);
+        if (!durationCheck.ok) {
+          setError(durationCheck.reason);
+          return;
+        }
+      } catch {
+        // Metadata read failed (e.g. unsupported container in this
+        // browser) — fall through and let the server-side check catch it.
       }
     }
     if (sourceType === "youtube" && !isYoutubeUrl(youtubeUrl)) {
@@ -82,10 +114,14 @@ export default function NewProjectPage() {
       const { project } = await createRes.json();
 
       if (sourceType === "upload" && file) {
+        // FR-4/edge case §11: chunked, retried multipart upload — resilient
+        // to transient drops mid-upload (a full page reload still requires
+        // re-selecting the file; see docs/DECISIONS.md).
         await upload(file.name, file, {
           access: "public",
           handleUploadUrl: "/api/upload",
           clientPayload: JSON.stringify({ projectId: project.id }),
+          multipart: true,
           onUploadProgress: ({ percentage }) => setProgress(percentage),
         });
       }

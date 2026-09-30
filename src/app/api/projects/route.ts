@@ -56,6 +56,15 @@ export async function POST(req: Request) {
     .values({ id: userId, email: "" })
     .onConflictDoNothing();
 
+  // Edge case §11: "admin can disable accounts."
+  const [user] = await db.select().from(users).where(eq(users.id, userId));
+  if (user?.isDisabled) {
+    return NextResponse.json(
+      { error: "This account has been disabled. Contact support." },
+      { status: 403 },
+    );
+  }
+
   const [project] = await db
     .insert(projects)
     .values({

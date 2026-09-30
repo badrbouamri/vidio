@@ -7,6 +7,7 @@ import { clips, projects, transcripts, type TranscriptSegment } from "@/db/schem
 import { withRetries } from "@/lib/detect-moments";
 import { validateTranslatedAlignment } from "@/lib/dubbing";
 import { estimateLlmCostUsd } from "@/lib/pricing";
+import { log } from "@/lib/log";
 
 // Machine-to-machine route — same pattern as /api/internal/detect-moments
 // (LLM calls live here, not in the Python worker — see docs/DECISIONS.md).
@@ -96,7 +97,7 @@ export async function POST(req: Request) {
       succeeded += 1;
       costUsd += result.costUsd;
     } catch (err) {
-      console.error(`Translation failed for clip ${clip.id}:`, err);
+      log.error("translate.clip_failed", err, { clipId: clip.id, projectId });
     }
   }
 

@@ -37,9 +37,19 @@ export async function POST(
 
   const db = getDb();
 
+  const [user] = await db.select().from(users).where(eq(users.id, userId));
+
+  // Edge case §11: "admin can disable accounts" — blocks all processing,
+  // not just new projects (unlike the out-of-minutes gate below).
+  if (user?.isDisabled) {
+    return NextResponse.json(
+      { error: "This account has been disabled. Contact support." },
+      { status: 403 },
+    );
+  }
+
   // M7.4/edge case §11: block new projects once the user is out of
   // minutes — retrying a failed project doesn't count as "new".
-  const [user] = await db.select().from(users).where(eq(users.id, userId));
   if (user && project.status === "created") {
     let minutesUsedPeriod = user.minutesUsedPeriod;
     if (isPeriodExpired(user.periodResetAt)) {

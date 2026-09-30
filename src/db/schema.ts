@@ -7,6 +7,7 @@ import {
   timestamp,
   uuid,
   pgEnum,
+  boolean,
 } from "drizzle-orm/pg-core";
 
 export const planEnum = pgEnum("plan", ["free", "pro"]);
@@ -47,6 +48,11 @@ export const users = pgTable("users", {
   email: text("email").notNull(),
   name: text("name"),
   plan: planEnum("plan").notNull().default("free"),
+  // M8.1: no self-serve admin invite flow — set directly in the DB
+  // (see docs/DECISIONS.md).
+  isAdmin: boolean("is_admin").notNull().default(false),
+  // Edge case §11: "Copyright/abuse → ... admin can disable accounts."
+  isDisabled: boolean("is_disabled").notNull().default(false),
   minutesUsedPeriod: real("minutes_used_period").notNull().default(0),
   // M7.2/M7.4: the current metering window. No Stripe subscription is wired
   // up yet to drive real billing-cycle boundaries (see docs/DECISIONS.md),
