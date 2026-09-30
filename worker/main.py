@@ -21,6 +21,7 @@ import psycopg
 import requests
 
 import ingest
+import render
 import transcribe
 from validation import ValidationError
 
@@ -104,8 +105,53 @@ def run_detect(conn, job, project) -> None:
 
 
 def run_render(conn, job, project) -> None:
-    """M4: FFmpeg cut + reframe + subtitles (FR-17..FR-24)."""
-    raise NotImplementedError("render stage not implemented yet (M4)")
+    """M4: FFmpeg cut + reframe + subtitles (FR-17..FR-24). Renders every
+    pending clip for the project; a per-clip failure doesn't fail the whole
+    stage unless every clip fails."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, start_s, end_s FROM clips WHERE project_id = %s AND status = 'pending'",
+            (project["id"],),
+        )
+        pending_clips = [
+            {"id": row[0], "start_s": row[1], "end_s": row[2]} for row in cur.fetchall()
+        ]
+        cur.execute(
+            "SELECT words, segments, language FROM transcripts WHERE project_id = %s",
+            (project["id"],),
+        )
+        row = cur.fetchone()
+
+    if not pending_clips:
+        return
+    if not row:
+        raise ValidationError("No transcript found for this project.")
+    transcript = {"words": row[0], "segments": row[1]}
+    subtitle_lang = row[2]
+
+    style_name = (project["options"] or {}).get("subtitleStyle") or render.DEFAULT_STYLE
+    work_dir = ingest.source_dir(project["id"])
+    source_path = ingest.local_source_path(project)
+
+    succeeded = 0
+    for clip in pending_clips:
+        try:
+            outputs = render.render_clip(source_path, clip, transcript, work_dir, style_name)
+            render.upload_clip_version(
+                clip["id"], clip["start_s"], clip["end_s"], style_name, subtitle_lang, outputs
+            )
+            with conn.cursor() as cur:
+                cur.execute("UPDATE clips SET status = 'ready' WHERE id = %s", (clip["id"],))
+            conn.commit()
+            succeeded += 1
+        except Exception:
+            traceback.print_exc()
+            with conn.cursor() as cur:
+                cur.execute("UPDATE clips SET status = 'failed' WHERE id = %s", (clip["id"],))
+            conn.commit()
+
+    if succeeded == 0:
+        raise ValidationError("All clips failed to render.")
 
 
 def run_translate(conn, job, project) -> None:

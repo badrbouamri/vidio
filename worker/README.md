@@ -10,7 +10,14 @@ project through its pipeline stages:
 - `detect` (M3) — triggers `/api/internal/detect-moments` in the Next.js app
   (LLM moment detection lives there — see docs/DECISIONS.md) and waits for it
   to persist Clip rows.
-- `render` / `translate` / `dub` — stubs until M4-M6 land.
+- `render` (M4) — for every pending Clip: face-detects to pick a reframing
+  strategy (faces.py/reframe.py), builds karaoke ASS subtitles (subtitles.py),
+  cuts + reframes + burns subtitles + loudness-normalizes in one ffmpeg pass
+  (ffmpeg_filters.py/render.py), generates a thumbnail and SRT/VTT, then
+  uploads everything to `/api/internal/clip-versions` in the Next.js app
+  (only place that touches Blob for clip outputs — see docs/DECISIONS.md).
+  A single clip's failure doesn't fail the whole stage.
+- `translate` / `dub` — stubs until M6 lands.
 
 Source files are kept on the worker's own local disk (`WORKER_STORAGE_DIR`),
 not re-uploaded to Blob — see docs/DECISIONS.md ("worker-local source
@@ -33,13 +40,20 @@ python main.py
 pytest
 ```
 
-Pure logic only (ffprobe/yt-dlp parsing, validation, stage transitions) — no
-network or real ffmpeg binary required.
+Mostly pure logic (ffprobe/yt-dlp parsing, validation, stage transitions,
+reframe-strategy selection, ffmpeg filter-string construction, ASS/SRT/VTT
+generation) — no network access required. Face detection (faces.py) and the
+actual ffmpeg subprocess calls (render.py) are exercised for real during
+development (a synthetic ffmpeg-generated source + MediaPipe's bundled
+model — see docs/DECISIONS.md) but aren't part of the `pytest` run, since CI
+doesn't have ffmpeg/mediapipe installed.
 
 ## Deploy
 
-Build the image (installs `ffmpeg` for `ffprobe` — see Dockerfile) and run it
-as a long-lived process on Modal / RunPod / Railway / Fly.io (PRD §7 — never
-inside a Vercel Function). Requires `DATABASE_URL` (same as the Next.js app,
-from `vercel env pull`), `STT_API_KEY`, `APP_BASE_URL` (the deployed Next.js
-app's URL), and `WORKER_INTERNAL_SECRET` (shared with that app).
+Build the image (installs `ffmpeg` — with libass/libfribidi/libharfbuzz for
+subtitle burn-in and RTL, see Dockerfile — plus `libgl1`/`libglib2.0-0` for
+opencv/mediapipe) and run it as a long-lived process on Modal / RunPod /
+Railway / Fly.io (PRD §7 — never inside a Vercel Function). Requires
+`DATABASE_URL` (same as the Next.js app, from `vercel env pull`),
+`STT_API_KEY`, `APP_BASE_URL` (the deployed Next.js app's URL), and
+`WORKER_INTERNAL_SECRET` (shared with that app).

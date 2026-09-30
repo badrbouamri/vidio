@@ -127,6 +127,7 @@ export const clipVersions = pgTable("clip_versions", {
   trim: jsonb("trim").$type<{ startS: number; endS: number }>().notNull(),
   videoKey: text("video_key"),
   srtKey: text("srt_key"),
+  vttKey: text("vtt_key"),
   thumbnailKey: text("thumbnail_key"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
