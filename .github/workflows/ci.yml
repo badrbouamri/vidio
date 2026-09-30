@@ -32,3 +32,15 @@ jobs:
           DATABASE_URL: "postgres://placeholder:placeholder@localhost:5432/placeholder"
           CLERK_SECRET_KEY: "sk_test_placeholder"
           NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: "pk_test_placeholder"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: worker/requirements-dev.txt
+
+      - run: pip install -r requirements-dev.txt
+        working-directory: worker
+
+      - run: pytest
+        working-directory: worker

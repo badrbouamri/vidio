@@ -17,6 +17,7 @@ export default function NewProjectPage() {
   const [sourceType, setSourceType] = useState<"upload" | "youtube">("upload");
   const [file, setFile] = useState<File | null>(null);
   const [youtubeUrl, setYoutubeUrl] = useState("");
+  const [sourceLanguage, setSourceLanguage] = useState("");
   const [clipLength, setClipLength] =
     useState<NonNullable<ProjectOptions["clipLength"]>>("medium");
   const [maxClips, setMaxClips] = useState(8);
@@ -49,6 +50,7 @@ export default function NewProjectPage() {
     setBusy(true);
     try {
       const options: ProjectOptions = {
+        sourceLanguage: sourceLanguage || undefined,
         clipLength,
         maxClips,
         targetLanguage: targetLanguage || undefined,
@@ -139,6 +141,22 @@ export default function NewProjectPage() {
         )}
 
         <fieldset className="flex flex-col gap-3">
+          <label className="flex flex-col gap-1 text-sm">
+            Source language
+            <select
+              value={sourceLanguage}
+              onChange={(e) => setSourceLanguage(e.target.value)}
+              className="rounded-md border p-2"
+            >
+              <option value="">Auto-detect</option>
+              <option value="en">English</option>
+              <option value="fr">French</option>
+              <option value="ar">Arabic</option>
+              <option value="de">German</option>
+              <option value="es">Spanish</option>
+            </select>
+          </label>
+
           <label className="flex flex-col gap-1 text-sm">
             Clip length
             <select

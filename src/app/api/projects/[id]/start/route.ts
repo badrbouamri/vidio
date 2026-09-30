@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { jobs, projects } from "@/db/schema";
 import { requireUserId } from "@/lib/auth";
+import { resumeStageFor } from "@/lib/jobs";
 import { getOwnedProject } from "@/lib/projects";
 
 // §9 POST /api/projects/:id/start — validate + enqueue pipeline.
@@ -34,9 +35,17 @@ export async function POST(
   }
 
   const db = getDb();
+  const [lastJob] = await db
+    .select()
+    .from(jobs)
+    .where(eq(jobs.projectId, id))
+    .orderBy(desc(jobs.createdAt))
+    .limit(1);
+  const stage = resumeStageFor(project.status, lastJob?.stage);
+
   const [job] = await db
     .insert(jobs)
-    .values({ projectId: id, stage: "ingest", status: "queued" })
+    .values({ projectId: id, stage, status: "queued" })
     .returning();
 
   await db

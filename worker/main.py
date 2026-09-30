@@ -11,15 +11,27 @@ this runs as its own long-lived process (Docker container on Modal/RunPod/
 Railway/Fly.io per PRD §7).
 """
 
+import json
 import os
 import time
 import traceback
 from datetime import datetime, timezone
 
 import psycopg
+import requests
+
+import ingest
+import transcribe
+from validation import ValidationError
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 POLL_INTERVAL_S = 5
+
+# M3.5: the LLM moment-detection call runs in the Next.js app (AI Gateway is
+# TS-native — see docs/DECISIONS.md), not here. The worker just triggers it
+# and waits for the synchronous result.
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:3000")
+WORKER_INTERNAL_SECRET = os.environ.get("WORKER_INTERNAL_SECRET", "")
 
 # Stage order mirrors PRD §9 job_stage enum. Each stage advances the job to
 # the next stage on success, or marks it failed with an error message.
@@ -32,18 +44,63 @@ def next_stage(stage: str) -> str | None:
 
 
 def run_ingest(conn, job, project) -> None:
-    """M2: download/validate source, extract duration. Stub for now."""
-    raise NotImplementedError("ingest stage not implemented yet (M2)")
+    """M2: download/validate source, extract duration (FR-5, FR-6)."""
+    result = ingest.run(project)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET duration_s = %s, storage_key = %s WHERE id = %s",
+            (result["duration_s"], result["storage_key"], project["id"]),
+        )
+    conn.commit()
 
 
 def run_transcribe(conn, job, project) -> None:
-    """M3: STT with word timestamps (FR-8)."""
-    raise NotImplementedError("transcribe stage not implemented yet (M3)")
+    """M3.1-M3.4: STT with word timestamps; persist transcript (FR-8, FR-9, FR-11)."""
+    path = ingest.local_source_path(project)
+    language_override = (project["options"] or {}).get("sourceLanguage")
+    result = transcribe.transcribe(path, language_override)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO transcripts (project_id, language, words, segments)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (project_id) DO UPDATE
+            SET language = EXCLUDED.language,
+                words = EXCLUDED.words,
+                segments = EXCLUDED.segments
+            """,
+            (
+                project["id"],
+                result["language"],
+                json.dumps(result["words"]),
+                json.dumps(result["segments"]),
+            ),
+        )
+        cur.execute(
+            "UPDATE projects SET language = %s WHERE id = %s",
+            (result["language"], project["id"]),
+        )
+    conn.commit()
 
 
 def run_detect(conn, job, project) -> None:
-    """M3: LLM moment detection + scoring (FR-12/FR-13)."""
-    raise NotImplementedError("detect stage not implemented yet (M3)")
+    """M3.5-M3.9: LLM moment detection + scoring (FR-12..FR-16). The actual
+    LLM call happens in the Next.js app, which owns the AI Gateway wiring;
+    this just triggers it and persists nothing itself (the endpoint writes
+    Clip rows directly)."""
+    resp = requests.post(
+        f"{APP_BASE_URL}/api/internal/detect-moments",
+        headers={"x-worker-secret": WORKER_INTERNAL_SECRET},
+        json={"projectId": project["id"]},
+        timeout=300,
+    )
+    if resp.status_code >= 400:
+        try:
+            message = resp.json().get("error")
+        except ValueError:
+            message = None
+        raise ValidationError(message or resp.text or "Moment detection failed.")
 
 
 def run_render(conn, job, project) -> None:

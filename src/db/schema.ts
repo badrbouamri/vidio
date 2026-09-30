@@ -172,6 +172,9 @@ export type TranscriptSegment = {
   end: number;
   text: string;
   speaker?: string;
+  /** FR-9/edge case §11 (mixed-language speech): flagged by the worker when
+   * STT confidence was low — see worker/transcribe.py. */
+  lowConfidence?: boolean;
 };
 
 export type ClipSubScores = {
