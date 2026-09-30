@@ -34,6 +34,19 @@ project through its pipeline stages:
   (`dub.can_use_voice_cloning`) but no cloning provider is wired up yet —
   see docs/DECISIONS.md.
 
+M7 (billing/limits) touches the pipeline in two places, both plain modules
+rather than a pipeline stage of their own:
+
+- `plans.py` — free/pro render settings (watermark, resolution cap);
+  `render_settings_for_plan()` is read by `run_render` and threaded into
+  `ffmpeg_filters.build_filter_complex`/`render.render_clip`.
+- `usage.py` — source-minutes metering (recorded once `ingest` knows the
+  duration) and per-job cost estimates (STT/LLM/TTS/compute, logged to
+  `jobs.cost_usd`) — the actual minutes-remaining gate that blocks *new*
+  projects lives in the Next.js app (`src/lib/plans.ts`,
+  `/api/projects/:id/start`), since that's a pre-job check, not a worker
+  concern.
+
 Source files are kept on the worker's own local disk (`WORKER_STORAGE_DIR`),
 not re-uploaded to Blob — see docs/DECISIONS.md ("worker-local source
 storage") for why, and its single-instance-or-shared-volume assumption.

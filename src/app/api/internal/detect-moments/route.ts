@@ -9,6 +9,7 @@ import {
   withRetries,
 } from "@/lib/detect-moments";
 import { selectClips, snapCandidate, type MomentCandidate } from "@/lib/moments";
+import { estimateLlmCostUsd } from "@/lib/pricing";
 
 // Machine-to-machine route — the worker calls this (not a browser), so it's
 // authenticated with a shared secret instead of a Clerk session. Deliberately
@@ -41,12 +42,12 @@ const responseSchema = z.object({ clips: z.array(candidateSchema) });
 async function detectChunk(
   chunk: TranscriptSegment[],
   clipLength: string,
-): Promise<MomentCandidate[]> {
+): Promise<{ candidates: MomentCandidate[]; costUsd: number }> {
   const transcriptText = chunk
     .map((s) => `[${s.start.toFixed(1)}-${s.end.toFixed(1)}] ${s.text}`)
     .join("\n");
 
-  const { object } = await withRetries(() =>
+  const { object, usage } = await withRetries(() =>
     generateObject({
       model: "anthropic/claude-sonnet-4.6",
       schema: responseSchema,
@@ -61,15 +62,18 @@ async function detectChunk(
     }),
   );
 
-  return object.clips.map((c) => ({
-    start: c.start,
-    end: c.end,
-    title: c.title,
-    hashtags: c.hashtags,
-    score: c.score,
-    subScores: c.sub_scores,
-    reason: c.reason,
-  }));
+  return {
+    candidates: object.clips.map((c) => ({
+      start: c.start,
+      end: c.end,
+      title: c.title,
+      hashtags: c.hashtags,
+      score: c.score,
+      subScores: c.sub_scores,
+      reason: c.reason,
+    })),
+    costUsd: estimateLlmCostUsd(usage),
+  };
 }
 
 export async function POST(req: Request) {
@@ -105,10 +109,11 @@ export async function POST(req: Request) {
   const clipLength = project.options.clipLength ?? "medium";
   const chunks = chunkSegments(transcript.segments);
 
-  const candidateLists = await Promise.all(
+  const chunkResults = await Promise.all(
     chunks.map((chunk) => detectChunk(chunk, clipLength)),
   );
-  const candidates = candidateLists.flat();
+  const candidates = chunkResults.flatMap((r) => r.candidates);
+  const costUsd = chunkResults.reduce((sum, r) => sum + r.costUsd, 0);
 
   const snapped = candidates.map((c) => snapCandidate(c, transcript.words));
   const selected = selectClips(snapped, project.options);
@@ -137,5 +142,5 @@ export async function POST(req: Request) {
     })),
   );
 
-  return NextResponse.json({ ok: true, count: selected.length });
+  return NextResponse.json({ ok: true, count: selected.length, costUsd });
 }

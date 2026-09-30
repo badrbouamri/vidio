@@ -6,6 +6,7 @@ see worker/README.md. Run these locally before trusting a render.py change.
 """
 
 import json
+import os
 import shutil
 import subprocess
 
@@ -23,6 +24,17 @@ try:
     CV2_AVAILABLE = True
 except ImportError:
     CV2_AVAILABLE = False
+
+# A font that actually exists on this machine, for watermark/RTL-style
+# drawtext tests — the worker image ships fonts-dejavu-core (Dockerfile),
+# but that path won't exist on Windows dev machines or a bare CI runner.
+_FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    r"C:\Windows\Fonts\arialbd.ttf",
+    r"C:\Windows\Fonts\arial.ttf",
+]
+LOCAL_FONT_PATH = next((p for p in _FONT_CANDIDATES if os.path.exists(p)), None)
 
 pytestmark = pytest.mark.skipif(not FFMPEG_AVAILABLE, reason="ffmpeg/ffprobe not installed")
 
@@ -275,3 +287,61 @@ class TestDubAudioAssembly:
 
         with open(outputs["srt_path"], encoding="utf-8") as f:
             assert "Bonjour le monde" in f.read()
+
+
+@pytest.mark.skipif(not CV2_AVAILABLE, reason="opencv not installed")
+@pytest.mark.skipif(LOCAL_FONT_PATH is None, reason="no usable font file found for drawtext")
+class TestPlanRendering:
+    """M7.5: resolution cap (720p free / 1080p paid) and watermark, applied
+    only on the free tier — real ffmpeg + pixel verification, not just the
+    string-builder tests in test_ffmpeg_filters.py."""
+
+    def test_free_plan_output_is_720p_with_watermark(self, tmp_path):
+        # Black source (not the testsrc2 pattern) so any bright pixel in the
+        # watermark region is unambiguously the watermark, not source content.
+        black_src = str(tmp_path / "black.mp4")
+        _run(
+            [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "color=c=black:size=1280x720:rate=30:duration=3",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+                "-c:v", "libx264", "-c:a", "aac",
+                black_src,
+            ]
+        )
+
+        fc, vlabel, alabel = ff.build_filter_complex(
+            "skip", 1280, 720, output_w=720, output_h=1280,
+            watermark=True, watermark_font_path=LOCAL_FONT_PATH,
+        )
+        out_path = str(tmp_path / "free.mp4")
+        args = ff.build_render_args(black_src, out_path, 0.0, 2.0, fc, vlabel, alabel)
+        _run(args)
+
+        probe = _probe(out_path)
+        video = next(s for s in probe["streams"] if s["codec_type"] == "video")
+        assert (video["width"], video["height"]) == (720, 1280)
+
+        frame_path = str(tmp_path / "free_frame.png")
+        subprocess.run(
+            ["ffmpeg", "-y", "-ss", "1.0", "-i", out_path, "-frames:v", "1", frame_path],
+            capture_output=True,
+        )
+        img = cv2.imread(frame_path)
+        # Watermark region (bottom-right ~120x50px): on an all-black source,
+        # any bright pixel here can only be the watermark text.
+        region = img[-60:-10, -140:-20]
+        assert int(np.max(region)) >= 150
+
+    def test_pro_plan_output_is_1080p_without_watermark(self, synthetic_16x9, tmp_path):
+        fc, vlabel, alabel = ff.build_filter_complex(
+            "skip", 1280, 720, output_w=1080, output_h=1920, watermark=False,
+        )
+        out_path = str(tmp_path / "pro.mp4")
+        args = ff.build_render_args(synthetic_16x9, out_path, 1.0, 3.0, fc, vlabel, alabel)
+        _run(args)
+
+        probe = _probe(out_path)
+        video = next(s for s in probe["streams"] if s["codec_type"] == "video")
+        assert (video["width"], video["height"]) == (1080, 1920)
+        assert "drawtext" not in fc

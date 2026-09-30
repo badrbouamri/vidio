@@ -3,9 +3,11 @@ FROM python:3.11-slim
 # ffmpeg provides ffprobe (source validation, M2.4) and ffmpeg (rendering,
 # M4 — built with libass/libfribidi/libharfbuzz for subtitle burn-in + RTL).
 # libgl1/libglib2.0-0 satisfy opencv-python-headless's/mediapipe's runtime
-# linking even without a display (M4.2 face detection).
+# linking even without a display (M4.2 face detection). fonts-dejavu-core
+# provides the watermark's drawtext font (M7.5) at
+# ffmpeg_filters.WATERMARK_FONT_PATH.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg libgl1 libglib2.0-0 \
+        ffmpeg libgl1 libglib2.0-0 fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

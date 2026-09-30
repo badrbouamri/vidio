@@ -48,6 +48,9 @@ def render_clip(
     dub_audio_path: str | None = None,
     subtitle_lang_pref: str = "original",
     translated_segments: list[dict] | None = None,
+    output_w: int = 1080,
+    output_h: int = 1920,
+    watermark: bool = False,
 ) -> dict:
     """clip: {"id", "start_s", "end_s"}. transcript: {"words", "segments"}
     (source-absolute timestamps, as persisted). Returns local output paths:
@@ -57,7 +60,9 @@ def render_clip(
     clip-length — see dub.py) instead of the source's own audio.
     `subtitle_lang_pref="translated"` burns `translated_segments` (static,
     segment-level captions — no per-word timing exists for translated text)
-    instead of the original-language word-by-word karaoke captions."""
+    instead of the original-language word-by-word karaoke captions.
+    M7.5: `output_w`/`output_h` cap resolution (720p free / 1080p paid),
+    `watermark` burns the free-tier watermark in."""
     probe = ingest.probe(source_path)
     source_w, source_h = probe.width, probe.height
     start_s, end_s = clip["start_s"], clip["end_s"]
@@ -100,6 +105,9 @@ def render_clip(
         ass_path=ass_path,
         crop_x_expr=crop_expr,
         audio_source_label=audio_source_label,
+        output_w=output_w,
+        output_h=output_h,
+        watermark=watermark,
     )
     video_path = os.path.join(work_dir, f"{clip['id']}.mp4")
     render_args = ff.build_render_args(

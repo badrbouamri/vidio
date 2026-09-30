@@ -6,6 +6,7 @@ import { getDb } from "@/db";
 import { clips, projects, transcripts, type TranscriptSegment } from "@/db/schema";
 import { withRetries } from "@/lib/detect-moments";
 import { validateTranslatedAlignment } from "@/lib/dubbing";
+import { estimateLlmCostUsd } from "@/lib/pricing";
 
 // Machine-to-machine route — same pattern as /api/internal/detect-moments
 // (LLM calls live here, not in the Python worker — see docs/DECISIONS.md).
@@ -20,8 +21,8 @@ const translationSchema = z.object({ translations: z.array(z.string()) });
 async function translateSegments(
   segments: TranscriptSegment[],
   targetLanguage: string,
-): Promise<TranscriptSegment[]> {
-  const { object } = await withRetries(async () => {
+): Promise<{ segments: TranscriptSegment[]; costUsd: number }> {
+  const { object, usage } = await withRetries(async () => {
     const result = await generateObject({
       model: "anthropic/claude-sonnet-4.6",
       schema: translationSchema,
@@ -43,7 +44,7 @@ async function translateSegments(
   const translated = segments.map((s, i) => ({ ...s, text: object.translations[i] }));
   const alignment = validateTranslatedAlignment(segments, translated);
   if (!alignment.ok) throw new Error(alignment.reason);
-  return translated;
+  return { segments: translated, costUsd: estimateLlmCostUsd(usage) };
 }
 
 export async function POST(req: Request) {
@@ -79,6 +80,7 @@ export async function POST(req: Request) {
   const projectClips = await db.select().from(clips).where(eq(clips.projectId, projectId));
 
   let succeeded = 0;
+  let costUsd = 0;
   for (const clip of projectClips) {
     const clipSegments = transcript.segments.filter(
       (s) => s.start >= clip.startS && s.start < clip.endS,
@@ -86,12 +88,13 @@ export async function POST(req: Request) {
     if (clipSegments.length === 0) continue;
 
     try {
-      const translated = await translateSegments(clipSegments, targetLanguage);
+      const result = await translateSegments(clipSegments, targetLanguage);
       await db
         .update(clips)
-        .set({ translatedSegments: translated })
+        .set({ translatedSegments: result.segments })
         .where(eq(clips.id, clip.id));
       succeeded += 1;
+      costUsd += result.costUsd;
     } catch (err) {
       console.error(`Translation failed for clip ${clip.id}:`, err);
     }
@@ -101,5 +104,5 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Translation failed for every clip." }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, count: succeeded });
+  return NextResponse.json({ ok: true, count: succeeded, costUsd });
 }

@@ -8,6 +8,7 @@ from ffmpeg_filters import (
     build_render_args,
     build_stretch_args,
     build_thumbnail_args,
+    build_watermark_filter,
     escape_ffmpeg_path,
     escape_filter_option,
 )
@@ -79,6 +80,30 @@ class TestBuildFilterComplex:
         assert "ass=" in fc
         assert vlabel == "v1"
 
+    def test_output_resolution_is_parametrized(self):
+        # M7.5: 720p cap for the free tier.
+        fc, _, _ = build_filter_complex("skip", 1280, 720, output_w=720, output_h=1280)
+        assert "scale=720:1280" in fc
+        assert "scale=1080:1920" not in fc
+
+    def test_watermark_off_by_default(self):
+        fc, vlabel, _ = build_filter_complex("skip", 1280, 720)
+        assert "drawtext" not in fc
+        assert vlabel == "v0"
+
+    def test_watermark_appends_drawtext_stage(self):
+        fc, vlabel, _ = build_filter_complex("skip", 1280, 720, watermark=True)
+        assert "drawtext" in fc
+        assert vlabel == "v2"
+
+    def test_watermark_after_subtitles_in_the_chain(self):
+        fc, vlabel, _ = build_filter_complex(
+            "skip", 1280, 720, ass_path="/tmp/x.ass", watermark=True
+        )
+        assert "[v0]ass=" in fc
+        assert "[v1]drawtext" in fc
+        assert vlabel == "v2"
+
 
 def test_build_render_args_shape():
     fc, vlabel, alabel = build_filter_complex("skip", 1280, 720)
@@ -144,3 +169,18 @@ def test_build_dub_assembly_args_shape():
     assert "seg0.wav" in args
     assert "seg1.wav" in args
     assert args[-1] == "out.wav"
+
+
+def test_build_watermark_filter_scales_fontsize_with_output_width():
+    filt_720 = build_watermark_filter(720)
+    filt_1080 = build_watermark_filter(1080)
+    assert "drawtext" in filt_720
+    assert "Nabd" in filt_720
+    assert "fontsize=25" in filt_720  # round(720*0.035)
+    assert "fontsize=38" in filt_1080  # round(1080*0.035)
+
+
+def test_build_watermark_filter_positions_bottom_right():
+    filt = build_watermark_filter(1080)
+    assert "x=w-tw-20" in filt
+    assert "y=h-th-20" in filt

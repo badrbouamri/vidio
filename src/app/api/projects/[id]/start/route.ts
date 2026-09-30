@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { jobs, projects } from "@/db/schema";
+import { jobs, projects, users } from "@/db/schema";
 import { requireUserId } from "@/lib/auth";
 import { resumeStageFor } from "@/lib/jobs";
+import { canStartNewProject, isPeriodExpired, PLAN_LIMITS } from "@/lib/plans";
 import { getOwnedProject } from "@/lib/projects";
 
 // §9 POST /api/projects/:id/start — validate + enqueue pipeline.
@@ -35,6 +36,37 @@ export async function POST(
   }
 
   const db = getDb();
+
+  // M7.4/edge case §11: block new projects once the user is out of
+  // minutes — retrying a failed project doesn't count as "new".
+  const [user] = await db.select().from(users).where(eq(users.id, userId));
+  if (user && project.status === "created") {
+    let minutesUsedPeriod = user.minutesUsedPeriod;
+    if (isPeriodExpired(user.periodResetAt)) {
+      minutesUsedPeriod = 0;
+      await db
+        .update(users)
+        .set({ minutesUsedPeriod: 0, periodResetAt: new Date() })
+        .where(eq(users.id, userId));
+    }
+    if (!canStartNewProject(user.plan, minutesUsedPeriod)) {
+      return NextResponse.json(
+        {
+          error:
+            "You're out of processing minutes for this billing period. Upgrade to start new projects.",
+          upgradeRequired: true,
+        },
+        { status: 402 },
+      );
+    }
+    if (project.options.dubbingEnabled && !PLAN_LIMITS[user.plan].dubbingAllowed) {
+      return NextResponse.json(
+        { error: "Dubbing is a paid-plan feature. Upgrade to enable it.", upgradeRequired: true },
+        { status: 402 },
+      );
+    }
+  }
+
   const [lastJob] = await db
     .select()
     .from(jobs)

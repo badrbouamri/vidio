@@ -21,9 +21,12 @@ import psycopg
 import requests
 
 import dub
+import ffmpeg_filters
 import ingest
+import plans
 import render
 import transcribe
+import usage
 from validation import ValidationError
 
 DATABASE_URL = os.environ["DATABASE_URL"]
@@ -54,6 +57,9 @@ def run_ingest(conn, job, project) -> None:
             (result["duration_s"], result["storage_key"], project["id"]),
         )
     conn.commit()
+    # M7.2/edge case §11: meter as soon as duration is known — this is what
+    # canStartNewProject() checks against for the user's *next* project.
+    usage.record_source_minutes(conn, project["user_id"], project["id"], result["duration_s"])
 
 
 def run_transcribe(conn, job, project) -> None:
@@ -84,12 +90,16 @@ def run_transcribe(conn, job, project) -> None:
             (result["language"], project["id"]),
         )
     conn.commit()
+    if project["duration_s"]:
+        usage.record_job_cost(conn, job["id"], usage.estimate_stt_cost(project["duration_s"]))
 
 
-def trigger_internal_route(path: str, project_id: str, fallback_error: str, timeout: int = 300) -> None:
-    """POSTs {projectId} to an /api/internal/* route and raises on failure.
-    Shared by every stage whose actual work (LLM calls) lives in the Next.js
-    app instead of here — see docs/DECISIONS.md."""
+def trigger_internal_route(path: str, project_id: str, fallback_error: str, timeout: int = 300) -> dict:
+    """POSTs {projectId} to an /api/internal/* route, raises on failure,
+    returns the parsed JSON body on success (M7.2: routes report their own
+    `costUsd` — the token-usage/pricing math lives with the AI SDK call, in
+    the Next.js app). Shared by every stage whose actual work (LLM calls)
+    lives there instead of here — see docs/DECISIONS.md."""
     resp = requests.post(
         f"{APP_BASE_URL}{path}",
         headers={"x-worker-secret": WORKER_INTERNAL_SECRET},
@@ -102,6 +112,10 @@ def trigger_internal_route(path: str, project_id: str, fallback_error: str, time
         except ValueError:
             message = None
         raise ValidationError(message or resp.text or fallback_error)
+    try:
+        return resp.json()
+    except ValueError:
+        return {}
 
 
 def run_detect(conn, job, project) -> None:
@@ -109,9 +123,10 @@ def run_detect(conn, job, project) -> None:
     LLM call happens in the Next.js app, which owns the AI Gateway wiring;
     this just triggers it and persists nothing itself (the endpoint writes
     Clip rows directly)."""
-    trigger_internal_route(
+    body = trigger_internal_route(
         "/api/internal/detect-moments", project["id"], "Moment detection failed."
     )
+    usage.record_job_cost(conn, job["id"], body.get("costUsd", 0))
 
 
 def run_render(conn, job, project) -> None:
@@ -157,8 +172,20 @@ def run_render(conn, job, project) -> None:
     work_dir = ingest.source_dir(project["id"])
     source_path = ingest.local_source_path(project)
 
+    # M7.5: resolution cap + watermark depend on the owner's plan.
+    with conn.cursor() as cur:
+        cur.execute("SELECT plan FROM users WHERE id = %s", (project["user_id"],))
+        plan_row = cur.fetchone()
+    plan_settings = plans.render_settings_for_plan(plan_row[0] if plan_row else "free")
+    # "720p"/"1080p" name the short (width) edge of our 9:16 portrait output
+    # — 1080x1920 is what everyone calls "1080p" vertical video.
+    output_w = plan_settings["max_height"]
+    output_h = round(output_w / ffmpeg_filters.TARGET_ASPECT)
+    watermark = plan_settings["watermark"]
+
     succeeded = 0
     for clip in pending_clips:
+        render_started_at = time.monotonic()
         try:
             # M5.3: a per-clip subtitle style/text override (set via
             # PATCH /api/clips/:id) beats the project-wide default.
@@ -182,6 +209,12 @@ def run_render(conn, job, project) -> None:
                 dub_audio_path=dub_path,
                 subtitle_lang_pref=clip["subtitle_lang_preference"] or "original",
                 translated_segments=clip["translated_segments"],
+                output_w=output_w,
+                output_h=output_h,
+                watermark=watermark,
+            )
+            usage.record_job_cost(
+                conn, job["id"], usage.estimate_compute_cost(time.monotonic() - render_started_at)
             )
             render.upload_clip_version(
                 clip["id"],
@@ -210,9 +243,10 @@ def run_translate(conn, job, project) -> None:
     """M6.1: subtitle translation (FR-25). No-op if the project has no
     target language — the Next.js route itself reports {skipped: true}
     rather than erroring, so this always succeeds in that case."""
-    trigger_internal_route(
+    body = trigger_internal_route(
         "/api/internal/translate-subtitles", project["id"], "Subtitle translation failed."
     )
+    usage.record_job_cost(conn, job["id"], body.get("costUsd", 0))
 
 
 def run_dub(conn, job, project) -> None:
@@ -249,6 +283,13 @@ def run_dub(conn, job, project) -> None:
         try:
             dub.build_dub_track(clip, segments, target_language, work_dir, allow_voice_cloning=can_clone)
             succeeded += 1
+
+            # M7.2: dubbing consumes extra credits (FR-42), separate from
+            # the source-minutes meter; also log the TTS cost for this clip.
+            clip_minutes = (clip["end_s"] - clip["start_s"]) / 60
+            usage.record_dubbing_credits(conn, project["user_id"], project["id"], clip_minutes)
+            char_count = sum(len(s["text"]) for s in segments)
+            usage.record_job_cost(conn, job["id"], usage.estimate_tts_cost(char_count))
         except Exception:
             traceback.print_exc()
 
@@ -293,16 +334,19 @@ def claim_next_job(conn):
 def fetch_project(conn, project_id):
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, source_type, source_url, storage_key, options FROM projects WHERE id = %s",
+            "SELECT id, user_id, source_type, source_url, storage_key, options, duration_s "
+            "FROM projects WHERE id = %s",
             (project_id,),
         )
         row = cur.fetchone()
         return {
             "id": row[0],
-            "source_type": row[1],
-            "source_url": row[2],
-            "storage_key": row[3],
-            "options": row[4],
+            "user_id": row[1],
+            "source_type": row[2],
+            "source_url": row[3],
+            "storage_key": row[4],
+            "options": row[5],
+            "duration_s": row[6],
         }
 
 

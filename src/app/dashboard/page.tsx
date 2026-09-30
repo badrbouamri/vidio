@@ -21,6 +21,9 @@ export default async function DashboardPage() {
       <header className="mb-8 flex items-center justify-between">
         <h1 className="text-2xl font-semibold">Projects</h1>
         <div className="flex items-center gap-3">
+          <Button asChild variant="outline">
+            <Link href="/account">Account</Link>
+          </Button>
           <Button asChild>
             <Link href="/dashboard/new">New project</Link>
           </Button>

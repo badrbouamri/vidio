@@ -10,6 +10,11 @@ Pure string-building, no subprocess calls — see render.py for execution.
 TARGET_ASPECT = 9 / 16
 LOUDNORM_FILTER = "loudnorm=I=-14:TP=-1.5:LRA=11"  # FR-19: ~-14 LUFS
 
+# M7.5: free-tier watermark. Font must be installed in the worker image —
+# see Dockerfile (fonts-dejavu-core) and docs/DECISIONS.md.
+WATERMARK_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+WATERMARK_TEXT = "Nabd"
+
 
 def escape_ffmpeg_path(path: str) -> str:
     """Escapes a filesystem path for embedding as a filter option value
@@ -46,6 +51,20 @@ def build_crop_x_expr(timeline: list[tuple[float, float]]) -> str:
     return expr
 
 
+def build_watermark_filter(output_w: int, font_path: str = WATERMARK_FONT_PATH) -> str:
+    """M7.5: free-tier watermark — bottom-right, semi-transparent, scaled to
+    the output width so it reads the same at 720p and 1080p. `font_path`
+    defaults to the worker image's installed font (see Dockerfile); tests
+    override it to verify against a locally available font."""
+    fontsize = max(16, round(output_w * 0.035))
+    escaped_font = escape_ffmpeg_path(font_path)
+    return (
+        f"drawtext=fontfile={escaped_font}:text='{WATERMARK_TEXT}':"
+        f"fontsize={fontsize}:fontcolor=white@0.7:"
+        "x=w-tw-20:y=h-th-20:shadowcolor=black@0.5:shadowx=2:shadowy=2"
+    )
+
+
 def build_filter_complex(
     strategy: str,
     source_w: int,
@@ -53,43 +72,50 @@ def build_filter_complex(
     ass_path: str | None = None,
     crop_x_expr: str | None = None,
     audio_source_label: str = "0:a",
+    output_w: int = 1080,
+    output_h: int = 1920,
+    watermark: bool = False,
+    watermark_font_path: str = WATERMARK_FONT_PATH,
 ) -> tuple[str, str, str]:
     """Returns (filter_complex_string, video_output_label, audio_output_label).
     `audio_source_label` defaults to the main input's audio (`0:a`); pass
     `1:a` when a second `-i` (M6.4's dubbed audio track) has been added to
-    the ffmpeg command and should be used instead."""
+    the ffmpeg command and should be used instead. `output_w`/`output_h`
+    implement M7.5's per-plan resolution cap (720p free / 1080p paid);
+    `watermark` burns the free-tier watermark in on top of everything else."""
     parts: list[str] = []
+    scale = f"scale={output_w}:{output_h}"
+    crop_out = f"crop={output_w}:{output_h}"
 
     if strategy == "skip":
-        parts.append(
-            "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
-            "crop=1080:1920[v0]"
-        )
+        parts.append(f"[0:v]{scale}:force_original_aspect_ratio=increase,{crop_out}[v0]")
     elif strategy == "center_crop":
         crop_w = round(source_h * TARGET_ASPECT)
         crop_x = round((source_w - crop_w) / 2)
-        parts.append(f"[0:v]crop={crop_w}:{source_h}:{crop_x}:0,scale=1080:1920[v0]")
+        parts.append(f"[0:v]crop={crop_w}:{source_h}:{crop_x}:0,{scale}[v0]")
     elif strategy == "letterbox":
         parts.append("[0:v]split=2[bg][fg]")
         parts.append(
-            "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
-            "crop=1080:1920,gblur=sigma=20[bg2]"
+            f"[bg]{scale}:force_original_aspect_ratio=increase,{crop_out},gblur=sigma=20[bg2]"
         )
-        parts.append("[fg]scale=1080:-2:force_original_aspect_ratio=decrease[fg2]")
+        parts.append(f"[fg]scale={output_w}:-2:force_original_aspect_ratio=decrease[fg2]")
         parts.append("[bg2][fg2]overlay=(W-w)/2:(H-h)/2[v0]")
     elif strategy == "face_track":
         if not crop_x_expr:
             raise ValueError("face_track strategy requires crop_x_expr")
         crop_w = round(source_h * TARGET_ASPECT)
         escaped_expr = escape_filter_option(crop_x_expr)
-        parts.append(f"[0:v]crop={crop_w}:{source_h}:{escaped_expr}:0,scale=1080:1920[v0]")
+        parts.append(f"[0:v]crop={crop_w}:{source_h}:{escaped_expr}:0,{scale}[v0]")
     else:
         raise ValueError(f"unknown reframe strategy: {strategy}")
 
     video_label = "v0"
     if ass_path:
-        parts.append(f"[v0]ass={escape_ffmpeg_path(ass_path)}[v1]")
+        parts.append(f"[{video_label}]ass={escape_ffmpeg_path(ass_path)}[v1]")
         video_label = "v1"
+    if watermark:
+        parts.append(f"[{video_label}]{build_watermark_filter(output_w, watermark_font_path)}[v2]")
+        video_label = "v2"
 
     parts.append(f"[{audio_source_label}]{LOUDNORM_FILTER}[a0]")
 

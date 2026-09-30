@@ -48,6 +48,12 @@ export const users = pgTable("users", {
   name: text("name"),
   plan: planEnum("plan").notNull().default("free"),
   minutesUsedPeriod: real("minutes_used_period").notNull().default(0),
+  // M7.2/M7.4: the current metering window. No Stripe subscription is wired
+  // up yet to drive real billing-cycle boundaries (see docs/DECISIONS.md),
+  // so this just rolls forward one calendar month at a time.
+  periodResetAt: timestamp("period_reset_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
