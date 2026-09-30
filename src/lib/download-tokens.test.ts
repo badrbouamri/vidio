@@ -12,27 +12,53 @@ describe("download tokens", () => {
     process.env.DOWNLOAD_SIGNING_SECRET = ORIGINAL_SECRET;
   });
 
-  it("round-trips a valid, unexpired token", () => {
-    const payload = { clipVersionId: "abc-123", kind: "video" as const, exp: Date.now() + 1000 };
+  it("round-trips a valid, unexpired clip-version token", () => {
+    const payload = {
+      type: "clip-version" as const,
+      clipVersionId: "abc-123",
+      kind: "video" as const,
+      exp: Date.now() + 1000,
+    };
+    const token = signDownloadToken(payload);
+    expect(verifyDownloadToken(token)).toEqual(payload);
+  });
+
+  it("round-trips a valid, unexpired export token", () => {
+    const payload = {
+      type: "export" as const,
+      blobKey: "exports/abc/clips.zip",
+      exp: Date.now() + 1000,
+    };
     const token = signDownloadToken(payload);
     expect(verifyDownloadToken(token)).toEqual(payload);
   });
 
   it("rejects an expired token", () => {
-    const payload = { clipVersionId: "abc-123", kind: "video" as const, exp: Date.now() - 1000 };
+    const payload = {
+      type: "clip-version" as const,
+      clipVersionId: "abc-123",
+      kind: "video" as const,
+      exp: Date.now() - 1000,
+    };
     const token = signDownloadToken(payload);
     expect(verifyDownloadToken(token)).toBeNull();
   });
 
   it("rejects a tampered payload", () => {
     const token = signDownloadToken({
+      type: "clip-version",
       clipVersionId: "abc-123",
       kind: "video",
       exp: Date.now() + 1000,
     });
     const [, sig] = token.split(".");
     const tamperedBody = Buffer.from(
-      JSON.stringify({ clipVersionId: "other-id", kind: "video", exp: Date.now() + 1000 }),
+      JSON.stringify({
+        type: "clip-version",
+        clipVersionId: "other-id",
+        kind: "video",
+        exp: Date.now() + 1000,
+      }),
     ).toString("base64url");
     expect(verifyDownloadToken(`${tamperedBody}.${sig}`)).toBeNull();
   });
@@ -43,7 +69,12 @@ describe("download tokens", () => {
   });
 
   it("respects an injected `now` for expiry checks (FR-34: ~24h)", () => {
-    const payload = { clipVersionId: "abc-123", kind: "srt" as const, exp: 1000 };
+    const payload = {
+      type: "clip-version" as const,
+      clipVersionId: "abc-123",
+      kind: "srt" as const,
+      exp: 1000,
+    };
     const token = signDownloadToken(payload);
     expect(verifyDownloadToken(token, 999)).toEqual(payload);
     expect(verifyDownloadToken(token, 1001)).toBeNull();

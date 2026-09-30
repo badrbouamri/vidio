@@ -10,11 +10,22 @@ export const DOWNLOAD_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
 export type DownloadKind = "video" | "srt" | "vtt";
 
-export type DownloadPayload = {
-  clipVersionId: string;
-  kind: DownloadKind;
-  exp: number;
-};
+export type Disposition = "attachment" | "inline";
+
+export type DownloadPayload =
+  | {
+      type: "clip-version";
+      clipVersionId: string;
+      kind: DownloadKind;
+      exp: number;
+      // FR-29: the clip editor's <video> preview needs "inline" so the
+      // browser plays it instead of downloading it; every other caller
+      // wants "attachment" (FR-33's actual downloads).
+      disposition?: Disposition;
+    }
+  // M5.7: a ZIP of selected clips — points at a private Blob pathname
+  // directly rather than a DB row, since it has no row of its own.
+  | { type: "export"; blobKey: string; exp: number };
 
 function secret(): string {
   const value = process.env.DOWNLOAD_SIGNING_SECRET || process.env.WORKER_INTERNAL_SECRET;

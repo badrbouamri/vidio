@@ -75,6 +75,7 @@ export default async function ProjectPage({
       )}
 
       <ClipsGallery
+        projectId={id}
         clips={clipRows.map((c) => ({ ...c, thumbnailUrl: c.thumbnailUrl ?? null }))}
       />
     </div>

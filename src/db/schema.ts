@@ -104,6 +104,11 @@ export const clips = pgTable("clips", {
     .references(() => projects.id, { onDelete: "cascade" }),
   startS: real("start_s").notNull(),
   endS: real("end_s").notNull(),
+  // FR-30: trim handles are bounded to ±30s of the *original* LLM-detected
+  // segment — these stay fixed after creation so that bound has something
+  // to measure from, even after repeated trims. See src/lib/trim.ts.
+  originalStartS: real("original_start_s").notNull(),
+  originalEndS: real("original_end_s").notNull(),
   title: text("title").notNull(),
   hashtags: jsonb("hashtags").$type<string[]>().notNull().default([]),
   score: integer("score").notNull(),
@@ -111,6 +116,10 @@ export const clips = pgTable("clips", {
   reason: text("reason").notNull(),
   status: clipStatusEnum("status").notNull().default("pending"),
   currentVersionId: uuid("current_version_id"),
+  // M5.3 per-clip overrides — null falls back to the project-level default
+  // (options.subtitleStyle) / the transcript slice, respectively.
+  subtitleStyle: text("subtitle_style"),
+  subtitleWords: jsonb("subtitle_words").$type<TranscriptWord[] | null>(),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

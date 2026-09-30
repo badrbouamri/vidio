@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { formatTimestamp } from "@/lib/format";
 import {
@@ -11,12 +12,21 @@ import {
 } from "@/lib/gallery";
 
 // UI screen 6 (PRD §10) / M4.8: cards sorted by score, filters (length,
-// score), bulk select. Downloads (M4.9/FR-33/FR-34) land here too.
-export function ClipsGallery({ clips }: { clips: GalleryClip[] }) {
+// score), bulk select. Downloads (M4.9/FR-33/FR-34) and ZIP export (M5.7)
+// land here too.
+export function ClipsGallery({
+  projectId,
+  clips,
+}: {
+  projectId: string;
+  clips: GalleryClip[];
+}) {
   const [lengthFilter, setLengthFilter] = useState<LengthFilter>("all");
   const [minScore, setMinScore] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const visible = useMemo(
     () => sortByScoreDesc(filterClips(clips, { length: lengthFilter, minScore })),
@@ -44,10 +54,25 @@ export function ClipsGallery({ clips }: { clips: GalleryClip[] }) {
     }
   }
 
-  async function downloadSelected() {
-    for (const clipId of selected) {
-      await download(clipId, "video");
-      await new Promise((r) => setTimeout(r, 400)); // avoid popup-blocked bursts
+  async function exportSelected() {
+    setExporting(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/clips/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clipIds: Array.from(selected) }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? "Export failed.");
+      }
+      const { url } = await res.json();
+      window.location.href = url;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setExporting(false);
     }
   }
 
@@ -85,11 +110,13 @@ export function ClipsGallery({ clips }: { clips: GalleryClip[] }) {
         </label>
 
         {selected.size > 0 && (
-          <Button size="sm" variant="outline" onClick={downloadSelected}>
-            Download {selected.size} selected
+          <Button size="sm" variant="outline" disabled={exporting} onClick={exportSelected}>
+            {exporting ? "Exporting…" : `Export ${selected.size} selected as ZIP`}
           </Button>
         )}
       </div>
+
+      {error && <p className="mb-2 text-sm text-destructive">{error}</p>}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         {visible.map((clip) => (
@@ -125,26 +152,33 @@ export function ClipsGallery({ clips }: { clips: GalleryClip[] }) {
               </div>
             </div>
 
-            {clip.status === "ready" && (
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={busy === `${clip.id}:video`}
-                  onClick={() => download(clip.id, "video")}
-                >
-                  Download MP4
+            <div className="flex flex-wrap gap-2">
+              <Link href={`/dashboard/${projectId}/clips/${clip.id}`}>
+                <Button size="sm" variant="outline">
+                  Edit
                 </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={busy === `${clip.id}:srt`}
-                  onClick={() => download(clip.id, "srt")}
-                >
-                  Download SRT
-                </Button>
-              </div>
-            )}
+              </Link>
+              {clip.status === "ready" && (
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={busy === `${clip.id}:video`}
+                    onClick={() => download(clip.id, "video")}
+                  >
+                    Download MP4
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={busy === `${clip.id}:srt`}
+                    onClick={() => download(clip.id, "srt")}
+                  >
+                    Download SRT
+                  </Button>
+                </>
+              )}
+            </div>
           </div>
         ))}
       </div>

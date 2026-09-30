@@ -127,6 +127,8 @@ export async function POST(req: Request) {
       projectId,
       startS: c.start,
       endS: c.end,
+      originalStartS: c.start,
+      originalEndS: c.end,
       title: c.title,
       hashtags: c.hashtags,
       score: Math.round(c.score),

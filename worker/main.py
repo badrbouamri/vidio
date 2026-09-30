@@ -110,11 +110,21 @@ def run_render(conn, job, project) -> None:
     stage unless every clip fails."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, start_s, end_s FROM clips WHERE project_id = %s AND status = 'pending'",
+            """
+            SELECT id, start_s, end_s, subtitle_style, subtitle_words
+            FROM clips WHERE project_id = %s AND status = 'pending'
+            """,
             (project["id"],),
         )
         pending_clips = [
-            {"id": row[0], "start_s": row[1], "end_s": row[2]} for row in cur.fetchall()
+            {
+                "id": row[0],
+                "start_s": row[1],
+                "end_s": row[2],
+                "subtitle_style": row[3],
+                "subtitle_words": row[4],
+            }
+            for row in cur.fetchall()
         ]
         cur.execute(
             "SELECT words, segments, language FROM transcripts WHERE project_id = %s",
@@ -126,16 +136,22 @@ def run_render(conn, job, project) -> None:
         return
     if not row:
         raise ValidationError("No transcript found for this project.")
-    transcript = {"words": row[0], "segments": row[1]}
+    transcript_words, transcript_segments = row[0], row[1]
     subtitle_lang = row[2]
 
-    style_name = (project["options"] or {}).get("subtitleStyle") or render.DEFAULT_STYLE
+    default_style = (project["options"] or {}).get("subtitleStyle") or render.DEFAULT_STYLE
     work_dir = ingest.source_dir(project["id"])
     source_path = ingest.local_source_path(project)
 
     succeeded = 0
     for clip in pending_clips:
         try:
+            # M5.3: a per-clip subtitle style/text override (set via
+            # PATCH /api/clips/:id) beats the project-wide default.
+            style_name = clip["subtitle_style"] or default_style
+            words = clip["subtitle_words"] or transcript_words
+            transcript = {"words": words, "segments": transcript_segments}
+
             outputs = render.render_clip(source_path, clip, transcript, work_dir, style_name)
             render.upload_clip_version(
                 clip["id"], clip["start_s"], clip["end_s"], style_name, subtitle_lang, outputs
