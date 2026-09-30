@@ -32,7 +32,13 @@ export default async function ClipEditorPage({
 
   return (
     <div className="mx-auto w-full max-w-2xl flex-1 p-8">
-      <ClipEditor clip={clip} words={words} sourceDurationS={project?.durationS ?? null} />
+      <ClipEditor
+        clip={clip}
+        words={words}
+        sourceDurationS={project?.durationS ?? null}
+        dubbingEnabled={Boolean(project?.options.dubbingEnabled)}
+        targetLanguage={project?.options.targetLanguage ?? null}
+      />
     </div>
   );
 }

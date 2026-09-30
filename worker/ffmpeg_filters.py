@@ -52,8 +52,12 @@ def build_filter_complex(
     source_h: int,
     ass_path: str | None = None,
     crop_x_expr: str | None = None,
+    audio_source_label: str = "0:a",
 ) -> tuple[str, str, str]:
-    """Returns (filter_complex_string, video_output_label, audio_output_label)."""
+    """Returns (filter_complex_string, video_output_label, audio_output_label).
+    `audio_source_label` defaults to the main input's audio (`0:a`); pass
+    `1:a` when a second `-i` (M6.4's dubbed audio track) has been added to
+    the ffmpeg command and should be used instead."""
     parts: list[str] = []
 
     if strategy == "skip":
@@ -87,7 +91,7 @@ def build_filter_complex(
         parts.append(f"[v0]ass={escape_ffmpeg_path(ass_path)}[v1]")
         video_label = "v1"
 
-    parts.append(f"[0:a]{LOUDNORM_FILTER}[a0]")
+    parts.append(f"[{audio_source_label}]{LOUDNORM_FILTER}[a0]")
 
     return ";".join(parts), video_label, "a0"
 
@@ -100,14 +104,22 @@ def build_render_args(
     filter_complex: str,
     video_label: str,
     audio_label: str,
+    audio_input_path: str | None = None,
 ) -> list[str]:
-    """FR-17/FR-19: single cut + encode pass. H.264 MP4, 1080x1920, 30fps, AAC."""
-    return [
+    """FR-17/FR-19: single cut + encode pass. H.264 MP4, 1080x1920, 30fps, AAC.
+    `audio_input_path` (M6.4) adds a second `-i` — an already clip-length
+    dub track, so it needs no `-ss`/`-to` of its own — for
+    `build_filter_complex`'s `audio_source_label="1:a"` to reference."""
+    args = [
         "ffmpeg",
         "-y",
         "-ss", f"{start_s:.3f}",
         "-to", f"{end_s:.3f}",
         "-i", input_path,
+    ]
+    if audio_input_path:
+        args += ["-i", audio_input_path]
+    args += [
         "-filter_complex", filter_complex,
         "-map", f"[{video_label}]",
         "-map", f"[{audio_label}]",
@@ -119,6 +131,7 @@ def build_render_args(
         "-b:a", "128k",
         output_path,
     ]
+    return args
 
 
 def build_thumbnail_args(input_path: str, output_path: str, at_s: float) -> list[str]:
@@ -131,3 +144,56 @@ def build_thumbnail_args(input_path: str, output_path: str, at_s: float) -> list
         "-frames:v", "1",
         output_path,
     ]
+
+
+def build_stretch_args(input_path: str, output_path: str, tempo: float) -> list[str]:
+    """M6.2: time-stretch TTS audio to fit its segment (edge case §11 — up
+    to 1.25x). `tempo` > 1 speeds up/shortens; verified empirically that
+    ffmpeg's `rubberband` divides duration by `tempo` (not multiplies)."""
+    return [
+        "ffmpeg", "-y",
+        "-i", input_path,
+        "-af", f"rubberband=tempo={tempo:.6f}",
+        output_path,
+    ]
+
+
+def build_dub_mix_filter(placements: list[tuple[int, float]]) -> str:
+    """M6.2/M6.3: places each (already-fitted) segment audio file at its
+    clip-relative offset over a silent base track, then mixes down to one
+    track. `placements` is [(ffmpeg input index, offset_s), ...] — input 0
+    is reserved for the silent base (see build_dub_assembly_args)."""
+    parts = ["[0:a]anull[base]"]
+    labels = []
+    for i, (input_idx, offset_s) in enumerate(placements):
+        delay_ms = round(offset_s * 1000)
+        label = f"d{i}"
+        parts.append(f"[{input_idx}:a]adelay={delay_ms}[{label}]")
+        labels.append(label)
+    mix_inputs = "[base]" + "".join(f"[{label}]" for label in labels)
+    parts.append(
+        f"{mix_inputs}amix=inputs={len(labels) + 1}:duration=first:dropout_transition=0[out]"
+    )
+    return ";".join(parts)
+
+
+def build_dub_assembly_args(
+    clip_duration_s: float,
+    segment_paths: list[str],
+    offsets_s: list[float],
+    output_path: str,
+) -> list[str]:
+    """Assembles per-segment dub audio into one clip-length track."""
+    args = [
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=mono:d={clip_duration_s:.3f}",
+    ]
+    for path in segment_paths:
+        args += ["-i", path]
+    placements = [(i + 1, offset) for i, offset in enumerate(offsets_s)]
+    args += [
+        "-filter_complex", build_dub_mix_filter(placements),
+        "-map", "[out]",
+        output_path,
+    ]
+    return args

@@ -176,3 +176,102 @@ class TestKaraokeAndRtlRendering:
         # Just needs to have rendered *something* without crashing — pixel
         # content is a weak proxy for "text appeared", not for correctness.
         assert int(np.any(img > 30, axis=-1).sum()) > 0
+
+
+class TestDubAudioAssembly:
+    """M6.2/M6.3: real ffmpeg verification that stretched/padded segment
+    audio lands at the right offsets in the assembled clip-length track."""
+
+    @staticmethod
+    def _rms_db_at(path, at_s, window_s=0.2):
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-ss", str(at_s), "-t", str(window_s), "-i", path,
+                "-af", "astats=metadata=1:reset=1", "-f", "null", "-",
+            ],
+            capture_output=True, text=True,
+        )
+        for line in result.stderr.splitlines():
+            if "RMS level dB" in line:
+                return float(line.split(":")[-1].strip())
+        return float("-inf")
+
+    def test_stretch_shortens_audio_to_the_target_duration(self, tmp_path):
+        tone = str(tmp_path / "tone.wav")
+        _run(["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", tone])
+
+        stretched = str(tmp_path / "stretched.wav")
+        _run(ff.build_stretch_args(tone, stretched, tempo=1.5))
+
+        probe = _probe(stretched)
+        assert float(probe["format"]["duration"]) == pytest.approx(2.0, abs=0.05)
+
+    def test_assembly_places_segments_at_their_offsets_and_silence_elsewhere(self, tmp_path):
+        seg0 = str(tmp_path / "seg0.wav")
+        seg1 = str(tmp_path / "seg1.wav")
+        _run(["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", seg0])
+        _run(["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=880:duration=1", seg1])
+
+        out = str(tmp_path / "assembled.wav")
+        args = ff.build_dub_assembly_args(4.0, [seg0, seg1], [0.5, 2.5], out)
+        _run(args)
+
+        probe = _probe(out)
+        assert float(probe["format"]["duration"]) == pytest.approx(4.0, abs=0.05)
+
+        # Silent before/between segments, audible during each segment's window.
+        assert self._rms_db_at(out, 0.1) == float("-inf")
+        assert self._rms_db_at(out, 1.0) > -60
+        assert self._rms_db_at(out, 2.0) == float("-inf")
+        assert self._rms_db_at(out, 3.0) > -60
+
+    def test_render_clip_uses_the_dub_track_when_audio_source_is_dubbed(
+        self, synthetic_16x9, tmp_path
+    ):
+        # M6.4: render_clip should wire a provided dub track in as the
+        # output's audio instead of the source's own — this exercises the
+        # real ffmpeg command (two -i's, [1:a] routed through loudnorm),
+        # not just the string-builder unit tests in test_ffmpeg_filters.py.
+        dub_track = str(tmp_path / "dub.wav")
+        _run(
+            [
+                "ffmpeg", "-y", "-f", "lavfi",
+                "-i", "sine=frequency=660:duration=2",
+                dub_track,
+            ]
+        )
+
+        clip = {"id": "dub-clip", "start_s": 1.0, "end_s": 3.0}
+        transcript = {"words": [], "segments": []}
+        outputs = render.render_clip(
+            synthetic_16x9,
+            clip,
+            transcript,
+            str(tmp_path),
+            audio_source="dubbed",
+            dub_audio_path=dub_track,
+        )
+
+        probe = _probe(outputs["video_path"])
+        audio = next(s for s in probe["streams"] if s["codec_type"] == "audio")
+        assert audio["codec_name"] == "aac"
+        assert float(probe["format"]["duration"]) == pytest.approx(2.0, abs=0.05)
+
+    def test_render_clip_burns_translated_segments_when_requested(
+        self, synthetic_16x9, tmp_path
+    ):
+        clip = {"id": "translated-clip", "start_s": 0.0, "end_s": 2.0}
+        transcript = {"words": [], "segments": []}
+        translated = [{"start": 0.0, "end": 1.0, "text": "Bonjour le monde"}]
+
+        outputs = render.render_clip(
+            synthetic_16x9,
+            clip,
+            transcript,
+            str(tmp_path),
+            subtitle_lang_pref="translated",
+            translated_segments=translated,
+        )
+
+        with open(outputs["srt_path"], encoding="utf-8") as f:
+            assert "Bonjour le monde" in f.read()

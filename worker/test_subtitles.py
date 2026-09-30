@@ -9,6 +9,7 @@ from subtitles import (
     Word,
     ass_color,
     build_ass,
+    build_ass_plain,
     build_srt,
     build_vtt,
     group_words_into_cards,
@@ -109,6 +110,38 @@ class TestBuildAss:
         style_line = next(line for line in content.splitlines() if line.startswith("Style:"))
         margins = style_line.split(",")[-4:-1]  # MarginL, MarginR, MarginV
         assert margins == [str(SAFE_MARGIN_L), str(SAFE_MARGIN_R), str(SAFE_MARGIN_V)]
+
+
+class TestBuildAssPlain:
+    """M6.4: translated subtitles — segment-level static captions, no
+    per-word karaoke tags (there's no per-word timing to hang them on)."""
+
+    def test_no_karaoke_tags(self):
+        segments = [{"start": 0.0, "end": 1.5, "text": "Bonjour le monde"}]
+        content = build_ass_plain(segments, STYLE_PRESETS["classic"])
+        assert "\\k" not in content
+        assert "Bonjour le monde" in content
+
+    def test_uppercase_style_applies(self):
+        segments = [{"start": 0.0, "end": 1.0, "text": "bonjour"}]
+        content = build_ass_plain(segments, STYLE_PRESETS["bold-yellow"])
+        assert "BONJOUR" in content
+
+    def test_wraps_long_text_up_to_max_lines(self):
+        segments = [{"start": 0.0, "end": 3.0, "text": "one two three four five six"}]
+        content = build_ass_plain(segments, STYLE_PRESETS["classic"], max_chars_per_line=10)
+        dialogue = next(line for line in content.splitlines() if line.startswith("Dialogue:"))
+        assert "\\N" in dialogue
+        assert dialogue.count("\\N") <= 1  # MAX_LINES_PER_CARD=2 -> at most one break
+
+    def test_one_dialogue_event_per_segment(self):
+        segments = [
+            {"start": 0.0, "end": 1.0, "text": "first"},
+            {"start": 1.0, "end": 2.0, "text": "second"},
+        ]
+        content = build_ass_plain(segments, STYLE_PRESETS["classic"])
+        dialogue_lines = [l for l in content.splitlines() if l.startswith("Dialogue:")]
+        assert len(dialogue_lines) == 2
 
 
 class TestSrtVtt:

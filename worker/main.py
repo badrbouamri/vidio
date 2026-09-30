@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 import psycopg
 import requests
 
+import dub
 import ingest
 import render
 import transcribe
@@ -85,23 +86,32 @@ def run_transcribe(conn, job, project) -> None:
     conn.commit()
 
 
-def run_detect(conn, job, project) -> None:
-    """M3.5-M3.9: LLM moment detection + scoring (FR-12..FR-16). The actual
-    LLM call happens in the Next.js app, which owns the AI Gateway wiring;
-    this just triggers it and persists nothing itself (the endpoint writes
-    Clip rows directly)."""
+def trigger_internal_route(path: str, project_id: str, fallback_error: str, timeout: int = 300) -> None:
+    """POSTs {projectId} to an /api/internal/* route and raises on failure.
+    Shared by every stage whose actual work (LLM calls) lives in the Next.js
+    app instead of here — see docs/DECISIONS.md."""
     resp = requests.post(
-        f"{APP_BASE_URL}/api/internal/detect-moments",
+        f"{APP_BASE_URL}{path}",
         headers={"x-worker-secret": WORKER_INTERNAL_SECRET},
-        json={"projectId": project["id"]},
-        timeout=300,
+        json={"projectId": project_id},
+        timeout=timeout,
     )
     if resp.status_code >= 400:
         try:
             message = resp.json().get("error")
         except ValueError:
             message = None
-        raise ValidationError(message or resp.text or "Moment detection failed.")
+        raise ValidationError(message or resp.text or fallback_error)
+
+
+def run_detect(conn, job, project) -> None:
+    """M3.5-M3.9: LLM moment detection + scoring (FR-12..FR-16). The actual
+    LLM call happens in the Next.js app, which owns the AI Gateway wiring;
+    this just triggers it and persists nothing itself (the endpoint writes
+    Clip rows directly)."""
+    trigger_internal_route(
+        "/api/internal/detect-moments", project["id"], "Moment detection failed."
+    )
 
 
 def run_render(conn, job, project) -> None:
@@ -111,7 +121,8 @@ def run_render(conn, job, project) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, start_s, end_s, subtitle_style, subtitle_words
+            SELECT id, start_s, end_s, subtitle_style, subtitle_words,
+                   audio_preference, subtitle_lang_preference, translated_segments
             FROM clips WHERE project_id = %s AND status = 'pending'
             """,
             (project["id"],),
@@ -123,6 +134,9 @@ def run_render(conn, job, project) -> None:
                 "end_s": row[2],
                 "subtitle_style": row[3],
                 "subtitle_words": row[4],
+                "audio_preference": row[5],
+                "subtitle_lang_preference": row[6],
+                "translated_segments": row[7],
             }
             for row in cur.fetchall()
         ]
@@ -152,9 +166,31 @@ def run_render(conn, job, project) -> None:
             words = clip["subtitle_words"] or transcript_words
             transcript = {"words": words, "segments": transcript_segments}
 
-            outputs = render.render_clip(source_path, clip, transcript, work_dir, style_name)
+            # M6.4: audio/subtitle-language toggles set via the clip editor.
+            audio_source = clip["audio_preference"] or "original"
+            dub_path = dub.dub_track_path(clip["id"], work_dir) if audio_source == "dubbed" else None
+            if dub_path and not os.path.exists(dub_path):
+                dub_path = None  # not prepared yet (dub stage hasn't run/finished) — fall back
+
+            outputs = render.render_clip(
+                source_path,
+                clip,
+                transcript,
+                work_dir,
+                style_name,
+                audio_source=audio_source if dub_path else "original",
+                dub_audio_path=dub_path,
+                subtitle_lang_pref=clip["subtitle_lang_preference"] or "original",
+                translated_segments=clip["translated_segments"],
+            )
             render.upload_clip_version(
-                clip["id"], clip["start_s"], clip["end_s"], style_name, subtitle_lang, outputs
+                clip["id"],
+                clip["start_s"],
+                clip["end_s"],
+                style_name,
+                subtitle_lang,
+                outputs,
+                audio_source=audio_source if dub_path else "original",
             )
             with conn.cursor() as cur:
                 cur.execute("UPDATE clips SET status = 'ready' WHERE id = %s", (clip["id"],))
@@ -171,13 +207,53 @@ def run_render(conn, job, project) -> None:
 
 
 def run_translate(conn, job, project) -> None:
-    """M6: subtitle translation (FR-25)."""
-    raise NotImplementedError("translate stage not implemented yet (M6)")
+    """M6.1: subtitle translation (FR-25). No-op if the project has no
+    target language — the Next.js route itself reports {skipped: true}
+    rather than erroring, so this always succeeds in that case."""
+    trigger_internal_route(
+        "/api/internal/translate-subtitles", project["id"], "Subtitle translation failed."
+    )
 
 
 def run_dub(conn, job, project) -> None:
-    """M6: TTS dubbing (FR-26)."""
-    raise NotImplementedError("dub stage not implemented yet (M6)")
+    """M6.2/M6.3: TTS dubbing (FR-26). Prepares (generates + locally caches)
+    a dubbed audio track per ready clip; does NOT create new ClipVersions —
+    the user picks "dubbed" audio in the clip editor and re-renders (M6.4,
+    reusing the M5 render endpoint) when they actually want it burned in."""
+    if not (project["options"] or {}).get("dubbingEnabled"):
+        return
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, start_s, end_s, translated_segments FROM clips "
+            "WHERE project_id = %s AND status = 'ready'",
+            (project["id"],),
+        )
+        ready_clips = [
+            {"id": row[0], "start_s": row[1], "end_s": row[2], "translated_segments": row[3]}
+            for row in cur.fetchall()
+        ]
+
+    if not ready_clips:
+        return
+
+    target_language = (project["options"] or {}).get("targetLanguage")
+    work_dir = ingest.source_dir(project["id"])
+    can_clone = dub.can_use_voice_cloning(project["options"] or {})
+
+    succeeded = 0
+    for clip in ready_clips:
+        segments = clip["translated_segments"]
+        if not segments:
+            continue  # translate stage hasn't produced text for this clip yet
+        try:
+            dub.build_dub_track(clip, segments, target_language, work_dir, allow_voice_cloning=can_clone)
+            succeeded += 1
+        except Exception:
+            traceback.print_exc()
+
+    if succeeded == 0:
+        raise ValidationError("Dubbing failed for every clip.")
 
 
 STAGE_HANDLERS = {

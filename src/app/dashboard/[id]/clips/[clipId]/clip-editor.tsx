@@ -21,6 +21,10 @@ type ClipData = {
   status: string;
   subtitleStyle: string | null;
   subtitleWords: TranscriptWord[] | null;
+  // M6.4
+  translatedSegments: unknown[] | null;
+  audioPreference: "original" | "dubbed";
+  subtitleLangPreference: "original" | "translated";
 };
 
 type Version = {
@@ -36,10 +40,14 @@ export function ClipEditor({
   clip,
   words,
   sourceDurationS,
+  dubbingEnabled,
+  targetLanguage,
 }: {
   clip: ClipData;
   words: TranscriptWord[];
   sourceDurationS: number | null;
+  dubbingEnabled: boolean;
+  targetLanguage: string | null;
 }) {
   const router = useRouter();
   const [title, setTitle] = useState(clip.title);
@@ -50,6 +58,11 @@ export function ClipEditor({
   const [subtitleWords, setSubtitleWords] = useState<TranscriptWord[]>(
     clip.subtitleWords ?? words.filter((w) => w.start >= clip.startS && w.start < clip.endS),
   );
+  const [audioPreference, setAudioPreference] = useState(clip.audioPreference);
+  const [subtitleLangPreference, setSubtitleLangPreference] = useState(
+    clip.subtitleLangPreference,
+  );
+  const hasTranslation = Boolean(clip.translatedSegments?.length);
   const [versions, setVersions] = useState<Version[]>([]);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -96,6 +109,8 @@ export function ClipEditor({
           endS,
           subtitleStyle,
           subtitleWords,
+          audioPreference,
+          subtitleLangPreference,
         }),
       });
       if (!res.ok) {
@@ -223,6 +238,47 @@ export function ClipEditor({
           ))}
         </select>
       </label>
+
+      {(dubbingEnabled || hasTranslation) && (
+        <fieldset className="flex flex-col gap-3 rounded-md border p-3">
+          <legend className="px-1 text-sm font-medium">
+            Translation & dubbing{targetLanguage ? ` (${targetLanguage})` : ""}
+          </legend>
+          {dubbingEnabled && (
+            <label className="flex flex-col gap-1 text-sm">
+              Audio
+              <select
+                value={audioPreference}
+                onChange={(e) =>
+                  setAudioPreference(e.target.value as "original" | "dubbed")
+                }
+                className="rounded-md border p-2"
+              >
+                <option value="original">Original</option>
+                <option value="dubbed">Dubbed</option>
+              </select>
+            </label>
+          )}
+          {hasTranslation && (
+            <label className="flex flex-col gap-1 text-sm">
+              Subtitles
+              <select
+                value={subtitleLangPreference}
+                onChange={(e) =>
+                  setSubtitleLangPreference(e.target.value as "original" | "translated")
+                }
+                className="rounded-md border p-2"
+              >
+                <option value="original">Original language</option>
+                <option value="translated">Translated</option>
+              </select>
+            </label>
+          )}
+          <p className="text-xs text-muted-foreground">
+            Changes here apply on the next re-render (FR-27).
+          </p>
+        </fieldset>
+      )}
 
       <fieldset className="flex flex-col gap-2 rounded-md border p-3">
         <legend className="px-1 text-sm font-medium">Subtitle text (timing kept)</legend>

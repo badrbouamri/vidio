@@ -44,10 +44,20 @@ def render_clip(
     transcript: dict,
     work_dir: str,
     style_name: str = DEFAULT_STYLE,
+    audio_source: str = "original",
+    dub_audio_path: str | None = None,
+    subtitle_lang_pref: str = "original",
+    translated_segments: list[dict] | None = None,
 ) -> dict:
     """clip: {"id", "start_s", "end_s"}. transcript: {"words", "segments"}
     (source-absolute timestamps, as persisted). Returns local output paths:
-    {"video_path", "thumbnail_path", "srt_path", "vtt_path"}."""
+    {"video_path", "thumbnail_path", "srt_path", "vtt_path"}.
+
+    M6.4: `audio_source="dubbed"` swaps in `dub_audio_path` (already
+    clip-length — see dub.py) instead of the source's own audio.
+    `subtitle_lang_pref="translated"` burns `translated_segments` (static,
+    segment-level captions — no per-word timing exists for translated text)
+    instead of the original-language word-by-word karaoke captions."""
     probe = ingest.probe(source_path)
     source_w, source_h = probe.width, probe.height
     start_s, end_s = clip["start_s"], clip["end_s"]
@@ -68,19 +78,39 @@ def render_clip(
             crop_expr = ff.build_crop_x_expr(timeline)
 
     style = subtitles.STYLE_PRESETS.get(style_name, subtitles.STYLE_PRESETS[DEFAULT_STYLE])
-    words = [subtitles.Word(text=w["word"], start=w["start"], end=w["end"]) for w in words_rel]
-    cards = subtitles.group_words_into_cards(words)
-    ass_content = subtitles.build_ass(cards, style)
+    if subtitle_lang_pref == "translated" and translated_segments:
+        translated_rel = _clip_relative(translated_segments, start_s, ["start", "end"])
+        ass_content = subtitles.build_ass_plain(translated_rel, style)
+        export_segments = translated_rel
+    else:
+        words = [subtitles.Word(text=w["word"], start=w["start"], end=w["end"]) for w in words_rel]
+        cards = subtitles.group_words_into_cards(words)
+        ass_content = subtitles.build_ass(cards, style)
+        export_segments = segments_rel
     ass_path = os.path.join(work_dir, f"{clip['id']}.ass")
     with open(ass_path, "w", encoding="utf-8") as f:
         f.write(ass_content)
 
+    use_dub = audio_source == "dubbed" and dub_audio_path
+    audio_source_label = "1:a" if use_dub else "0:a"
     filter_complex, video_label, audio_label = ff.build_filter_complex(
-        strategy, source_w, source_h, ass_path=ass_path, crop_x_expr=crop_expr
+        strategy,
+        source_w,
+        source_h,
+        ass_path=ass_path,
+        crop_x_expr=crop_expr,
+        audio_source_label=audio_source_label,
     )
     video_path = os.path.join(work_dir, f"{clip['id']}.mp4")
     render_args = ff.build_render_args(
-        source_path, video_path, start_s, end_s, filter_complex, video_label, audio_label
+        source_path,
+        video_path,
+        start_s,
+        end_s,
+        filter_complex,
+        video_label,
+        audio_label,
+        audio_input_path=dub_audio_path if use_dub else None,
     )
     result = subprocess.run(render_args, capture_output=True, text=True)
     if result.returncode != 0:
@@ -99,9 +129,9 @@ def render_clip(
     srt_path = os.path.join(work_dir, f"{clip['id']}.srt")
     vtt_path = os.path.join(work_dir, f"{clip['id']}.vtt")
     with open(srt_path, "w", encoding="utf-8") as f:
-        f.write(subtitles.build_srt(segments_rel))
+        f.write(subtitles.build_srt(export_segments))
     with open(vtt_path, "w", encoding="utf-8") as f:
-        f.write(subtitles.build_vtt(segments_rel))
+        f.write(subtitles.build_vtt(export_segments))
 
     return {
         "video_path": video_path,
@@ -118,6 +148,7 @@ def upload_clip_version(
     style_name: str,
     subtitle_lang: str,
     outputs: dict,
+    audio_source: str = "original",
 ) -> None:
     """POSTs the rendered files to the Next.js app, which uploads them to
     Blob and writes the clip_versions row (see docs/DECISIONS.md)."""
@@ -125,6 +156,7 @@ def upload_clip_version(
         "clipId": clip_id,
         "subtitleStyle": style_name,
         "subtitleLang": subtitle_lang,
+        "audio": audio_source,
         "trimStart": str(start_s),
         "trimEnd": str(end_s),
     }

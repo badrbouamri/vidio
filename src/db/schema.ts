@@ -39,6 +39,7 @@ export const clipStatusEnum = pgEnum("clip_status", [
   "failed",
 ]);
 export const audioSourceEnum = pgEnum("audio_source", ["original", "dubbed"]);
+export const subtitleLangPrefEnum = pgEnum("subtitle_lang_pref", ["original", "translated"]);
 
 // PRD §8: User (Clerk owns identity; this row mirrors the subset we bill/meter against)
 export const users = pgTable("users", {
@@ -120,6 +121,18 @@ export const clips = pgTable("clips", {
   // (options.subtitleStyle) / the transcript slice, respectively.
   subtitleStyle: text("subtitle_style"),
   subtitleWords: jsonb("subtitle_words").$type<TranscriptWord[] | null>(),
+  // M6.1: LLM-translated segments (project.options.targetLanguage), one
+  // per original transcript segment within this clip's range, same
+  // start/end (FR-25: "timing kept aligned per segment") — see
+  // docs/DECISIONS.md for why translated captions are segment-level
+  // (static), not word-level karaoke like the original-language ones.
+  translatedSegments: jsonb("translated_segments").$type<TranscriptSegment[] | null>(),
+  // M6.4: what the *next* re-render should use — toggled in the clip
+  // editor, applied by worker/render.py.
+  audioPreference: audioSourceEnum("audio_preference").notNull().default("original"),
+  subtitleLangPreference: subtitleLangPrefEnum("subtitle_lang_preference")
+    .notNull()
+    .default("original"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -168,6 +181,10 @@ export type ProjectOptions = {
   subtitleStyle?: string;
   targetLanguage?: string;
   dubbingEnabled?: boolean;
+  // FR-26 assumption: voice cloning is off by default and gated on
+  // explicit consent — see src/lib/dubbing.ts.
+  voiceCloningEnabled?: boolean;
+  voiceCloningConsent?: boolean;
 };
 
 export type TranscriptWord = {

@@ -9,6 +9,7 @@ import {
   isYoutubeUrl,
   validateFileMeta,
 } from "@/lib/video-validation";
+import { SUPPORTED_TARGET_LANGUAGES } from "@/lib/dubbing";
 import type { ProjectOptions } from "@/db/schema";
 
 // UI screen 4 (PRD §10) / §4 steps 2-3: upload or YouTube URL + options.
@@ -23,6 +24,8 @@ export default function NewProjectPage() {
   const [maxClips, setMaxClips] = useState(8);
   const [targetLanguage, setTargetLanguage] = useState("");
   const [dubbingEnabled, setDubbingEnabled] = useState(false);
+  const [voiceCloningEnabled, setVoiceCloningEnabled] = useState(false);
+  const [voiceCloningConsent, setVoiceCloningConsent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<number | null>(null);
@@ -55,6 +58,8 @@ export default function NewProjectPage() {
         maxClips,
         targetLanguage: targetLanguage || undefined,
         dubbingEnabled,
+        voiceCloningEnabled: dubbingEnabled ? voiceCloningEnabled : undefined,
+        voiceCloningConsent: dubbingEnabled ? voiceCloningConsent : undefined,
       };
 
       const createRes = await fetch("/api/projects", {
@@ -192,23 +197,48 @@ export default function NewProjectPage() {
               className="rounded-md border p-2"
             >
               <option value="">None</option>
-              <option value="en">English</option>
-              <option value="fr">French</option>
-              <option value="ar">Arabic (MSA)</option>
-              <option value="de">German</option>
-              <option value="es">Spanish</option>
+              {SUPPORTED_TARGET_LANGUAGES.map((lang) => (
+                <option key={lang.code} value={lang.code}>
+                  {lang.label}
+                </option>
+              ))}
             </select>
           </label>
 
           {targetLanguage && (
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={dubbingEnabled}
-                onChange={(e) => setDubbingEnabled(e.target.checked)}
-              />
-              Dub audio (voice cloning off by default — see settings)
-            </label>
+            <>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={dubbingEnabled}
+                  onChange={(e) => setDubbingEnabled(e.target.checked)}
+                />
+                Dub audio
+              </label>
+
+              {dubbingEnabled && (
+                <div className="ml-6 flex flex-col gap-2 border-l pl-3 text-sm">
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={voiceCloningEnabled}
+                      onChange={(e) => setVoiceCloningEnabled(e.target.checked)}
+                    />
+                    Clone the original voice (off by default — uses a stock voice otherwise)
+                  </label>
+                  {voiceCloningEnabled && (
+                    <label className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={voiceCloningConsent}
+                        onChange={(e) => setVoiceCloningConsent(e.target.checked)}
+                      />
+                      I confirm I have the right to clone this voice
+                    </label>
+                  )}
+                </div>
+              )}
+            </>
           )}
         </fieldset>
 

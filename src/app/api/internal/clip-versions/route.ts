@@ -32,7 +32,12 @@ export async function POST(req: Request) {
   }
 
   const form = await req.formData();
-  let clipId: string, subtitleStyle: string, subtitleLang: string, trimStart: string, trimEnd: string;
+  let clipId: string,
+    subtitleStyle: string,
+    subtitleLang: string,
+    trimStart: string,
+    trimEnd: string,
+    audio: "original" | "dubbed";
   let video: File, thumbnail: File, srt: File, vtt: File;
   try {
     clipId = requireString(form, "clipId");
@@ -40,6 +45,8 @@ export async function POST(req: Request) {
     subtitleLang = requireString(form, "subtitleLang");
     trimStart = requireString(form, "trimStart");
     trimEnd = requireString(form, "trimEnd");
+    const audioValue = form.get("audio");
+    audio = audioValue === "dubbed" ? "dubbed" : "original";
     video = requireFile(form, "video");
     thumbnail = requireFile(form, "thumbnail");
     srt = requireFile(form, "srt");
@@ -78,6 +85,7 @@ export async function POST(req: Request) {
       clipId,
       subtitleStyle,
       subtitleLang,
+      audio,
       trim: { startS: Number(trimStart), endS: Number(trimEnd) },
       videoKey: videoBlob.pathname,
       srtKey: srtBlob.pathname,

@@ -179,15 +179,8 @@ SAFE_MARGIN_R = 60
 SAFE_MARGIN_V = 260
 
 
-def build_ass(
-    cards: list[Card],
-    style: SubtitleStyle,
-    video_w: int = 1080,
-    video_h: int = 1920,
-) -> str:
-    """FR-21/FR-22/FR-23: word-by-word karaoke subtitles as an ASS file for
-    ffmpeg's `ass` filter to burn in."""
-    header = f"""[Script Info]
+def _ass_header(style: SubtitleStyle, video_w: int, video_h: int) -> str:
+    return f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {video_w}
 PlayResY: {video_h}
@@ -201,6 +194,17 @@ Style: Default,{style.font},{style.font_size},{ass_color(style.primary_color)},{
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+
+
+def build_ass(
+    cards: list[Card],
+    style: SubtitleStyle,
+    video_w: int = 1080,
+    video_h: int = 1920,
+) -> str:
+    """FR-21/FR-22/FR-23: word-by-word karaoke subtitles as an ASS file for
+    ffmpeg's `ass` filter to burn in."""
+    header = _ass_header(style, video_w, video_h)
     events = []
     for card in cards:
         text_parts = []
@@ -217,6 +221,49 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             f"{_seconds_to_ass_time(card.end)},Default,,0,0,0,,{text}"
         )
 
+    return header + "\n".join(events) + "\n"
+
+
+def _wrap_plain_text(text: str, max_chars_per_line: int, max_lines: int) -> str:
+    """No per-word timing exists for translated text (FR-25 keeps only
+    segment-level timing), so this wraps by character count instead of
+    packing words — same MAX_LINES_PER_CARD cap as the karaoke path (FR-21)."""
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if len(candidate) <= max_chars_per_line or not current:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+        if len(lines) == max_lines:
+            break
+    if current and len(lines) < max_lines:
+        lines.append(current)
+    return "\\N".join(lines)
+
+
+def build_ass_plain(
+    segments: list[dict],
+    style: SubtitleStyle,
+    video_w: int = 1080,
+    video_h: int = 1920,
+    max_chars_per_line: int = MAX_CHARS_PER_LINE,
+    max_lines: int = MAX_LINES_PER_CARD,
+) -> str:
+    """M6.4: static (non-karaoke) captions for translated subtitles —
+    `segments` is [{"start", "end", "text"}, ...], already clip-relative."""
+    header = _ass_header(style, video_w, video_h)
+    events = []
+    for seg in segments:
+        text = seg["text"].upper() if style.uppercase else seg["text"]
+        wrapped = _wrap_plain_text(text, max_chars_per_line, max_lines)
+        events.append(
+            f"Dialogue: 0,{_seconds_to_ass_time(seg['start'])},"
+            f"{_seconds_to_ass_time(seg['end'])},Default,,0,0,0,,{wrapped}"
+        )
     return header + "\n".join(events) + "\n"
 
 

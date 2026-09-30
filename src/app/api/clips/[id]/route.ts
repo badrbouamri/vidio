@@ -34,6 +34,8 @@ export async function GET(
     clip,
     sourceDurationS: project?.durationS ?? null,
     words,
+    dubbingEnabled: Boolean(project?.options.dubbingEnabled),
+    targetLanguage: project?.options.targetLanguage ?? null,
   });
 }
 
@@ -44,6 +46,9 @@ type PatchBody = Partial<{
   endS: number;
   subtitleStyle: string | null;
   subtitleWords: TranscriptWord[] | null;
+  // M6.4: which the *next* re-render should use.
+  audioPreference: "original" | "dubbed";
+  subtitleLangPreference: "original" | "translated";
 }>;
 
 // FR-31/FR-30: trim/text/style/title edits. Does not re-render — that's the
@@ -72,6 +77,10 @@ export async function PATCH(
   if (body.hashtags !== undefined) updates.hashtags = body.hashtags;
   if (body.subtitleStyle !== undefined) updates.subtitleStyle = body.subtitleStyle;
   if (body.subtitleWords !== undefined) updates.subtitleWords = body.subtitleWords;
+  if (body.audioPreference !== undefined) updates.audioPreference = body.audioPreference;
+  if (body.subtitleLangPreference !== undefined) {
+    updates.subtitleLangPreference = body.subtitleLangPreference;
+  }
 
   if (body.startS !== undefined || body.endS !== undefined) {
     const newStart = body.startS ?? clip.startS;
