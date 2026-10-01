@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { generateObject } from "ai";
 import { google } from "@ai-sdk/google";
 import { z } from "zod";
+import { generateJsonText } from "@/lib/llm-json";
 
 // M6.2 edge case §11: "shorten the translation and regenerate" — called by
 // worker/dub.py when even max-stretch TTS wouldn't fit a segment's audio.
@@ -28,15 +28,20 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "text and targetLanguage are required" }, { status: 400 });
   }
 
-  const { object } = await generateObject({
-    model: TRANSLATION_MODEL,
+  // Plain generateText + manual JSON parse, not generateObject — see
+  // docs/DECISIONS.md (Gemini structured-output mode observed 503ing).
+  const { data } = await generateJsonText(
+    {
+      model: TRANSLATION_MODEL,
+      prompt: [
+        `The following ${targetLanguage} subtitle line is too long to be spoken within its time slot.`,
+        "Rewrite it noticeably shorter while keeping the same meaning and language.",
+        'Respond with ONLY a JSON object of this exact shape, no markdown fences, no other text: {"text": "..."}',
+        `Line: ${text}`,
+      ].join("\n\n"),
+    },
     schema,
-    prompt: [
-      `The following ${targetLanguage} subtitle line is too long to be spoken within its time slot.`,
-      "Rewrite it noticeably shorter while keeping the same meaning and language. Return only the rewritten line.",
-      `Line: ${text}`,
-    ].join("\n\n"),
-  });
+  );
 
-  return NextResponse.json({ text: object.text });
+  return NextResponse.json({ text: data.text });
 }

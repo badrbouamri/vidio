@@ -1,20 +1,23 @@
 import { NextResponse } from "next/server";
-import { generateObject } from "ai";
+import { google } from "@ai-sdk/google";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { clips, projects, transcripts, type TranscriptSegment } from "@/db/schema";
-import {
-  chunkSegments,
-  withRetries,
-} from "@/lib/detect-moments";
+import { chunkSegments } from "@/lib/detect-moments";
+import { generateJsonText } from "@/lib/llm-json";
 import { selectClips, snapCandidate, type MomentCandidate } from "@/lib/moments";
-import { estimateLlmCostUsd } from "@/lib/pricing";
+import { estimateGeminiCostUsd } from "@/lib/pricing";
 
 // Machine-to-machine route — the worker calls this (not a browser), so it's
 // authenticated with a shared secret instead of a Clerk session. Deliberately
 // outside the `/api/projects(.*)` matcher in proxy.ts.
 const WORKER_INTERNAL_SECRET = process.env.WORKER_INTERNAL_SECRET;
+
+// Gemini direct, via the user's own free-tier key — same reasoning and
+// model as translate-subtitles/shorten-text (see docs/DECISIONS.md): keep
+// everything on one free key rather than billing through AI Gateway.
+const DETECT_MODEL = google("gemini-3.8-flash");
 
 // Mirrors the PRD §9 LLM moment-detection output schema exactly (field
 // names, not the app's camelCase — this is what the model is prompted for).
@@ -47,23 +50,26 @@ async function detectChunk(
     .map((s) => `[${s.start.toFixed(1)}-${s.end.toFixed(1)}] ${s.text}`)
     .join("\n");
 
-  const { object, usage } = await withRetries(() =>
-    generateObject({
-      model: "anthropic/claude-sonnet-4.6",
-      schema: responseSchema,
+  // Plain generateText + manual JSON parse, not generateObject — see
+  // docs/DECISIONS.md (Gemini structured-output mode observed 503ing).
+  const { data, usage } = await generateJsonText(
+    {
+      model: DETECT_MODEL,
       prompt: [
         "You find short, self-contained, highly shareable moments in a video transcript for social clips (TikTok/Reels/Shorts).",
         `Target clip length: ${clipLength}.`,
         "Each candidate must have a clear hook, a complete thought, and a strong ending. Use the exact timestamps from the transcript below.",
         "Score 0-100 overall plus sub-scores for hook, flow, value, trend.",
+        'Respond with ONLY a JSON object of this exact shape, no markdown fences, no other text: {"clips": [{"start": 0, "end": 0, "title": "...", "hashtags": ["..."], "score": 0, "sub_scores": {"hook": 0, "flow": 0, "value": 0, "trend": 0}, "reason": "..."}]}',
         "Transcript (seconds):",
         transcriptText,
       ].join("\n\n"),
-    }),
+    },
+    responseSchema,
   );
 
   return {
-    candidates: object.clips.map((c) => ({
+    candidates: data.clips.map((c) => ({
       start: c.start,
       end: c.end,
       title: c.title,
@@ -72,7 +78,7 @@ async function detectChunk(
       subScores: c.sub_scores,
       reason: c.reason,
     })),
-    costUsd: estimateLlmCostUsd(usage),
+    costUsd: estimateGeminiCostUsd(usage),
   };
 }
 

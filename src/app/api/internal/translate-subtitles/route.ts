@@ -1,11 +1,10 @@
 import { NextResponse } from "next/server";
-import { generateObject } from "ai";
 import { google } from "@ai-sdk/google";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { clips, projects, transcripts, type TranscriptSegment } from "@/db/schema";
-import { withRetries } from "@/lib/detect-moments";
+import { generateJson, withRetries } from "@/lib/llm-json";
 import { validateTranslatedAlignment } from "@/lib/dubbing";
 import { estimateGeminiCostUsd } from "@/lib/pricing";
 import { log } from "@/lib/log";
@@ -31,29 +30,38 @@ async function translateSegments(
   segments: TranscriptSegment[],
   targetLanguage: string,
 ): Promise<{ segments: TranscriptSegment[]; costUsd: number }> {
-  const { object, usage } = await withRetries(async () => {
-    const result = await generateObject({
-      model: TRANSLATION_MODEL,
-      schema: translationSchema,
-      prompt: [
-        `Translate each of the following ${segments.length} subtitle lines to ${targetLanguage}.`,
-        "Return exactly one translated line per input line, in the same order. Do not merge, split, or skip any.",
-        "Lines:",
-        segments.map((s, i) => `${i + 1}. ${s.text}`).join("\n"),
-      ].join("\n\n"),
-    });
-    if (result.object.translations.length !== segments.length) {
+  // Plain generateText + manual JSON parse, not generateObject — Gemini's
+  // structured-output mode has been observed 503ing under demand while
+  // plain text generation succeeds. See docs/DECISIONS.md. The length and
+  // alignment checks live *inside* the retry loop (not just the schema
+  // parse) so a bad-but-valid-JSON response also triggers a fresh attempt.
+  let lastCostUsd = 0;
+  const translated = await withRetries(async () => {
+    const { data, usage } = await generateJson(
+      {
+        model: TRANSLATION_MODEL,
+        prompt: [
+          `Translate each of the following ${segments.length} subtitle lines to ${targetLanguage}.`,
+          "Return exactly one translated line per input line, in the same order. Do not merge, split, or skip any.",
+          `Respond with ONLY a JSON object of this exact shape, no markdown fences, no other text: {"translations": [${segments.map(() => '"..."').join(", ")}]}`,
+          "Lines:",
+          segments.map((s, i) => `${i + 1}. ${s.text}`).join("\n"),
+        ].join("\n\n"),
+      },
+      translationSchema,
+    );
+    lastCostUsd = estimateGeminiCostUsd(usage);
+    if (data.translations.length !== segments.length) {
       throw new Error(
-        `Expected ${segments.length} translations, got ${result.object.translations.length}`,
+        `Expected ${segments.length} translations, got ${data.translations.length}`,
       );
     }
-    return result;
+    const zipped = segments.map((s, i) => ({ ...s, text: data.translations[i] }));
+    const alignment = validateTranslatedAlignment(segments, zipped);
+    if (!alignment.ok) throw new Error(alignment.reason);
+    return zipped;
   });
-
-  const translated = segments.map((s, i) => ({ ...s, text: object.translations[i] }));
-  const alignment = validateTranslatedAlignment(segments, translated);
-  if (!alignment.ok) throw new Error(alignment.reason);
-  return { segments: translated, costUsd: estimateGeminiCostUsd(usage) };
+  return { segments: translated, costUsd: lastCostUsd };
 }
 
 export async function POST(req: Request) {
