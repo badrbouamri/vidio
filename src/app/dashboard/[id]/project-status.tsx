@@ -38,6 +38,7 @@ export function ProjectStatus({
   const [data, setData] = useState<ProjectDetail | null>(null);
   const [status, setStatus] = useState(initialStatus);
   const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,12 +67,24 @@ export function ProjectStatus({
   }, [projectId, status]);
 
   const failedJob = data?.jobs.find((j) => j.status === "failed");
+  // Distinct from a failed job: the project never got a job queued at all
+  // (e.g. /start errored or dropped before the redirect, or an earlier
+  // attempt never completed) — "pending" everywhere forever otherwise,
+  // with no way back in from the UI.
+  const neverStarted = status === "created" && data !== null && data.jobs.length === 0;
 
   async function handleRetry() {
     setRetrying(true);
+    setRetryError(null);
     try {
-      await fetch(`/api/projects/${projectId}/start`, { method: "POST" });
+      const res = await fetch(`/api/projects/${projectId}/start`, { method: "POST" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? "Failed to start processing.");
+      }
       setStatus("queued");
+    } catch (err) {
+      setRetryError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
       setRetrying(false);
     }
@@ -97,11 +110,12 @@ export function ProjectStatus({
         })}
       </ol>
 
-      {failedJob && (
+      {(failedJob || neverStarted) && (
         <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3">
           <p className="text-sm text-destructive">
-            Failed at &quot;{STAGE_LABELS[failedJob.stage]}&quot;:{" "}
-            {failedJob.error ?? "Unknown error"}
+            {failedJob
+              ? `Failed at "${STAGE_LABELS[failedJob.stage]}": ${failedJob.error ?? "Unknown error"}`
+              : "Processing never started for this project."}
           </p>
           <Button
             size="sm"
@@ -112,6 +126,9 @@ export function ProjectStatus({
           >
             {retrying ? "Retrying…" : "Retry"}
           </Button>
+          {retryError && (
+            <p className="mt-2 text-sm text-destructive">{retryError}</p>
+          )}
         </div>
       )}
     </div>
