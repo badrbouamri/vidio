@@ -1,10 +1,14 @@
 import { NextResponse } from "next/server";
 import { generateObject } from "ai";
+import { google } from "@ai-sdk/google";
 import { z } from "zod";
 
 // M6.2 edge case §11: "shorten the translation and regenerate" — called by
 // worker/dub.py when even max-stretch TTS wouldn't fit a segment's audio.
+// Part of the translation feature, so it uses the same direct Gemini key as
+// translate-subtitles — see docs/DECISIONS.md.
 const WORKER_INTERNAL_SECRET = process.env.WORKER_INTERNAL_SECRET;
+const TRANSLATION_MODEL = google("gemini-3.8-flash");
 
 const schema = z.object({ text: z.string() });
 
@@ -25,7 +29,7 @@ export async function POST(req: Request) {
   }
 
   const { object } = await generateObject({
-    model: "anthropic/claude-sonnet-4.6",
+    model: TRANSLATION_MODEL,
     schema,
     prompt: [
       `The following ${targetLanguage} subtitle line is too long to be spoken within its time slot.`,

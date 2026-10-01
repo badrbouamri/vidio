@@ -1,17 +1,25 @@
 import { NextResponse } from "next/server";
 import { generateObject } from "ai";
+import { google } from "@ai-sdk/google";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { clips, projects, transcripts, type TranscriptSegment } from "@/db/schema";
 import { withRetries } from "@/lib/detect-moments";
 import { validateTranslatedAlignment } from "@/lib/dubbing";
-import { estimateLlmCostUsd } from "@/lib/pricing";
+import { estimateGeminiCostUsd } from "@/lib/pricing";
 import { log } from "@/lib/log";
 
 // Machine-to-machine route — same pattern as /api/internal/detect-moments
 // (LLM calls live here, not in the Python worker — see docs/DECISIONS.md).
 const WORKER_INTERNAL_SECRET = process.env.WORKER_INTERNAL_SECRET;
+
+// Translation (only) runs on Gemini direct, via a user-supplied free-tier
+// key (GOOGLE_GENERATIVE_AI_API_KEY) — not through AI Gateway, since the
+// point is to use that key's own quota rather than Gateway credits. Moment
+// detection (detect-moments) stays on Claude via Gateway. See
+// docs/DECISIONS.md.
+const TRANSLATION_MODEL = google("gemini-3.8-flash");
 
 const translationSchema = z.object({ translations: z.array(z.string()) });
 
@@ -25,7 +33,7 @@ async function translateSegments(
 ): Promise<{ segments: TranscriptSegment[]; costUsd: number }> {
   const { object, usage } = await withRetries(async () => {
     const result = await generateObject({
-      model: "anthropic/claude-sonnet-4.6",
+      model: TRANSLATION_MODEL,
       schema: translationSchema,
       prompt: [
         `Translate each of the following ${segments.length} subtitle lines to ${targetLanguage}.`,
@@ -45,7 +53,7 @@ async function translateSegments(
   const translated = segments.map((s, i) => ({ ...s, text: object.translations[i] }));
   const alignment = validateTranslatedAlignment(segments, translated);
   if (!alignment.ok) throw new Error(alignment.reason);
-  return { segments: translated, costUsd: estimateLlmCostUsd(usage) };
+  return { segments: translated, costUsd: estimateGeminiCostUsd(usage) };
 }
 
 export async function POST(req: Request) {
