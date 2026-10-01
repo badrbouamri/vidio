@@ -27,11 +27,29 @@ export function estimateLlmCostUsd(usage: TokenUsage): number {
   return estimateCostUsd(usage, CLAUDE_INPUT_COST_PER_1K_TOKENS, CLAUDE_OUTPUT_COST_PER_1K_TOKENS);
 }
 
-/** Gemini Flash direct (translate-subtitles, shorten-text). */
+/** Gemini Flash direct — now only the fallback path (see llm-json.ts). */
 export function estimateGeminiCostUsd(usage: TokenUsage): number {
   return estimateCostUsd(
     usage,
     GEMINI_FLASH_INPUT_COST_PER_1K_TOKENS,
     GEMINI_FLASH_OUTPUT_COST_PER_1K_TOKENS,
   );
+}
+
+/** Groq direct (translate-subtitles, shorten-text, detect-moments — primary
+ * path). Always $0: the free tier has no card on file, so going over a
+ * limit gets rate-limited (429), never billed. Revisit if the user ever
+ * adds Groq billing. */
+export function estimateGroqCostUsd(): number {
+  return 0;
+}
+
+/** Dispatches on a `LanguageModel`'s `.provider` id (e.g. "groq.chat",
+ * "google.generative-ai") so call sites using `withModelFallback` /
+ * `generateJsonTextWithFallback` don't need to track which model in the
+ * fallback list actually answered. */
+export function estimateCostUsdForProvider(provider: string, usage: TokenUsage): number {
+  if (provider.startsWith("groq")) return estimateGroqCostUsd();
+  if (provider.startsWith("google")) return estimateGeminiCostUsd(usage);
+  return 0;
 }

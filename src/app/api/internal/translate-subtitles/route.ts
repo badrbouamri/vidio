@@ -1,24 +1,17 @@
 import { NextResponse } from "next/server";
-import { google } from "@ai-sdk/google";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { clips, projects, transcripts, type TranscriptSegment } from "@/db/schema";
-import { generateJson, withRetries } from "@/lib/llm-json";
+import { generateJson, withModelFallback } from "@/lib/llm-json";
+import { TEXT_MODELS } from "@/lib/llm-models";
 import { validateTranslatedAlignment } from "@/lib/dubbing";
-import { estimateGeminiCostUsd } from "@/lib/pricing";
+import { estimateCostUsdForProvider } from "@/lib/pricing";
 import { log } from "@/lib/log";
 
 // Machine-to-machine route — same pattern as /api/internal/detect-moments
 // (LLM calls live here, not in the Python worker — see docs/DECISIONS.md).
 const WORKER_INTERNAL_SECRET = process.env.WORKER_INTERNAL_SECRET;
-
-// Translation (only) runs on Gemini direct, via a user-supplied free-tier
-// key (GOOGLE_GENERATIVE_AI_API_KEY) — not through AI Gateway, since the
-// point is to use that key's own quota rather than Gateway credits. Moment
-// detection (detect-moments) stays on Claude via Gateway. See
-// docs/DECISIONS.md.
-const TRANSLATION_MODEL = google("gemini-3.8-flash");
 
 const translationSchema = z.object({ translations: z.array(z.string()) });
 
@@ -34,23 +27,21 @@ async function translateSegments(
   // structured-output mode has been observed 503ing under demand while
   // plain text generation succeeds. See docs/DECISIONS.md. The length and
   // alignment checks live *inside* the retry loop (not just the schema
-  // parse) so a bad-but-valid-JSON response also triggers a fresh attempt.
+  // parse) so a bad-but-valid-JSON response also triggers a fresh attempt —
+  // and inside the model-fallback loop, so a bad-but-valid response from
+  // Groq falls through to retrying Gemini, not just re-asking Groq.
+  const prompt = [
+    `Translate each of the following ${segments.length} subtitle lines to ${targetLanguage}.`,
+    "Return exactly one translated line per input line, in the same order. Do not merge, split, or skip any.",
+    `Respond with ONLY a JSON object of this exact shape, no markdown fences, no other text: {"translations": [${segments.map(() => '"..."').join(", ")}]}`,
+    "Lines:",
+    segments.map((s, i) => `${i + 1}. ${s.text}`).join("\n"),
+  ].join("\n\n");
+
   let lastCostUsd = 0;
-  const translated = await withRetries(async () => {
-    const { data, usage } = await generateJson(
-      {
-        model: TRANSLATION_MODEL,
-        prompt: [
-          `Translate each of the following ${segments.length} subtitle lines to ${targetLanguage}.`,
-          "Return exactly one translated line per input line, in the same order. Do not merge, split, or skip any.",
-          `Respond with ONLY a JSON object of this exact shape, no markdown fences, no other text: {"translations": [${segments.map(() => '"..."').join(", ")}]}`,
-          "Lines:",
-          segments.map((s, i) => `${i + 1}. ${s.text}`).join("\n"),
-        ].join("\n\n"),
-      },
-      translationSchema,
-    );
-    lastCostUsd = estimateGeminiCostUsd(usage);
+  const translated = await withModelFallback(TEXT_MODELS, async (model) => {
+    const { data, usage } = await generateJson({ model, prompt }, translationSchema);
+    lastCostUsd = estimateCostUsdForProvider(model.provider, usage);
     if (data.translations.length !== segments.length) {
       throw new Error(
         `Expected ${segments.length} translations, got ${data.translations.length}`,

@@ -10,21 +10,40 @@ clip's `audio_preference` is "dubbed" (M6.4).
 
 Voice cloning (FR-26 assumption) is gated but not actually implemented —
 see can_use_voice_cloning and docs/DECISIONS.md.
+
+TTS provider: edge-tts (free, unofficial — rides Microsoft Edge's
+read-aloud service, no API key) is primary; OpenAI's hosted TTS API is an
+optional fallback, used only if TTS_API_KEY is set and edge-tts raises.
+See docs/DECISIONS.md for the risk tradeoff (unofficial API vs. billed).
 """
 
 import os
 import subprocess
 
+import edge_tts
 import requests
 
 import ffmpeg_filters as ff
 import ingest
 from validation import ValidationError
 
-TTS_API_KEY = os.environ.get("TTS_API_KEY")
+TTS_API_KEY = os.environ.get("TTS_API_KEY")  # optional fallback only
 TTS_API_URL = "https://api.openai.com/v1/audio/speech"
 TTS_MODEL = "tts-1"
-TTS_VOICE = "alloy"  # stock voice — see can_use_voice_cloning
+TTS_VOICE = "alloy"  # OpenAI fallback's stock voice — see can_use_voice_cloning
+
+# edge-tts voice per FR-28 target-language code (src/lib/dubbing.ts's
+# SUPPORTED_TARGET_LANGUAGES) — one stable, well-known Microsoft neural
+# voice per language, same "single stock voice" scope as the OpenAI
+# fallback (no cloning, see can_use_voice_cloning).
+EDGE_TTS_VOICES = {
+    "en": "en-US-AriaNeural",
+    "fr": "fr-FR-DeniseNeural",
+    "ar": "ar-SA-HamedNeural",
+    "de": "de-DE-KatjaNeural",
+    "es": "es-ES-ElviraNeural",
+}
+DEFAULT_EDGE_TTS_VOICE = EDGE_TTS_VOICES["en"]
 
 APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:3000")
 WORKER_INTERNAL_SECRET = os.environ.get("WORKER_INTERNAL_SECRET", "")
@@ -82,8 +101,18 @@ def fit_segment_audio(
     raise AssertionError("unreachable")  # pragma: no cover
 
 
-def synthesize_speech(text: str, dest_path: str) -> tuple[str, float]:
-    """Calls the hosted TTS API, writes the audio, returns (path, duration_s)."""
+def synthesize_speech_edge_tts(text: str, dest_path: str, target_language: str | None) -> tuple[str, float]:
+    """Primary TTS path — free, no API key. `dest_path` ends up holding mp3
+    bytes regardless of its extension; ffmpeg/ffprobe sniff the real
+    container, so this is fine for the stretch/assembly steps downstream."""
+    voice = EDGE_TTS_VOICES.get(target_language or "", DEFAULT_EDGE_TTS_VOICE)
+    edge_tts.Communicate(text, voice).save_sync(dest_path)
+    duration_s = ingest.probe(dest_path).duration_s
+    return dest_path, duration_s
+
+
+def synthesize_speech_openai(text: str, dest_path: str) -> tuple[str, float]:
+    """Fallback TTS path — billed, only reachable when TTS_API_KEY is set."""
     resp = requests.post(
         TTS_API_URL,
         headers={"Authorization": f"Bearer {TTS_API_KEY}"},
@@ -95,6 +124,18 @@ def synthesize_speech(text: str, dest_path: str) -> tuple[str, float]:
         f.write(resp.content)
     duration_s = ingest.probe(dest_path).duration_s
     return dest_path, duration_s
+
+
+def synthesize_speech(text: str, dest_path: str, target_language: str | None = None) -> tuple[str, float]:
+    """Tries edge-tts first; falls back to OpenAI TTS only if TTS_API_KEY is
+    set and edge-tts raises (network hiccup, or Microsoft changing/blocking
+    the unofficial endpoint — see docs/DECISIONS.md)."""
+    try:
+        return synthesize_speech_edge_tts(text, dest_path, target_language)
+    except Exception:
+        if not TTS_API_KEY:
+            raise
+        return synthesize_speech_openai(text, dest_path)
 
 
 def request_shorter_translation(text: str, target_language: str) -> str:
@@ -128,7 +169,7 @@ def build_dub_track(
         raw_path = os.path.join(work_dir, f"{clip['id']}_seg{i}_raw.wav")
 
         def synth(text: str, _path=raw_path) -> tuple[str, float]:
-            return synthesize_speech(text, _path)
+            return synthesize_speech(text, _path, target_language)
 
         def shorten(text: str) -> str:
             return request_shorter_translation(text, target_language)

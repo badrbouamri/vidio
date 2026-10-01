@@ -17,6 +17,12 @@ export function extractJsonText(text: string): string {
 
 type GenerateTextUsage = Awaited<ReturnType<typeof generateText>>["usage"];
 
+// `LanguageModel` = a plain gateway-routed string | an actual provider
+// model object. The fallback helpers below need `.provider` on each model
+// (to attribute cost — see pricing.ts's estimateCostUsdForProvider), so
+// they're typed over just the object half of that union.
+type ProviderLanguageModel = Exclude<LanguageModel, string>;
+
 /** One attempt — no retry. Throws on API failure, invalid JSON, or schema
  * mismatch; callers that need extra call-site validation (e.g. "array
  * length must match N") should wrap this (and that check) together in
@@ -50,4 +56,46 @@ export async function generateJsonText<T>(
   maxRetries: number = MAX_LLM_RETRIES,
 ): Promise<{ data: T; usage: GenerateTextUsage }> {
   return withRetries(() => generateJson(params, schema), maxRetries);
+}
+
+/** Retries `attempt` against each model in order (its own `withRetries`
+ * budget per model) before moving to the next — e.g. `[groqModel,
+ * geminiModel]` means: retry Groq up to maxRetries times, and only then
+ * fall back to retrying Gemini. Surfaces the last model's error if every
+ * model's every attempt fails. See docs/DECISIONS.md — Groq is primary
+ * (generous free-tier quota), Gemini is the fallback (20 req/day cap). */
+export async function withModelFallback<T, M extends ProviderLanguageModel = ProviderLanguageModel>(
+  models: readonly M[],
+  attempt: (model: M) => Promise<T>,
+  maxRetriesPerModel: number = MAX_LLM_RETRIES,
+): Promise<T> {
+  if (models.length === 0) throw new Error("withModelFallback: no models given");
+  let lastError: unknown;
+  for (const model of models) {
+    try {
+      return await withRetries(() => attempt(model), maxRetriesPerModel);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError;
+}
+
+/** generateJson, retried per-model, falling back across `models` in order.
+ * Combines `generateJsonText` (schema-is-enough validity) with
+ * `withModelFallback` (provider fallback). */
+export async function generateJsonTextWithFallback<T, M extends ProviderLanguageModel = ProviderLanguageModel>(
+  models: readonly M[],
+  prompt: string,
+  schema: z.ZodType<T>,
+  maxRetriesPerModel: number = MAX_LLM_RETRIES,
+): Promise<{ data: T; usage: GenerateTextUsage; model: M }> {
+  return withModelFallback<{ data: T; usage: GenerateTextUsage; model: M }, M>(
+    models,
+    async (model) => {
+      const result = await generateJson({ model, prompt }, schema);
+      return { ...result, model };
+    },
+    maxRetriesPerModel,
+  );
 }

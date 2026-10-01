@@ -2,13 +2,16 @@
 M3.1/M3.2/M3.3/M3.8: speech-to-text with word-level timestamps.
 
 Calls a hosted STT API (per docs/DECISIONS.md — "hosted APIs for v1", not
-self-hosted faster-whisper/WhisperX): OpenAI's `/v1/audio/transcriptions`
-with `timestamp_granularities=["word"]`, which gives word-level timestamps
-plus per-segment `avg_logprob`/`no_speech_prob` we reuse below.
+self-hosted faster-whisper/WhisperX). Groq's Whisper endpoint is primary —
+free-tier, OpenAI-API-compatible (`/openai/v1/audio/transcriptions`, same
+`timestamp_granularities=["word"]`/`verbose_json` shape as OpenAI's own
+API, so `parse_transcription` below is provider-agnostic). OpenAI's own
+Whisper API is an optional fallback, used only if STT_API_KEY is set and
+Groq raises (quota, outage, or no GROQ_API_KEY configured at all).
 
-Diarization (FR-10) is NOT implemented — the chosen provider doesn't offer
-it, so `speaker` stays unset on every word/segment until a
-diarization-capable provider is added (see docs/DECISIONS.md).
+Diarization (FR-10) is NOT implemented — neither provider offers it, so
+`speaker` stays unset on every word/segment until a diarization-capable
+provider is added (see docs/DECISIONS.md).
 """
 
 import os
@@ -17,7 +20,14 @@ import requests
 
 from validation import ValidationError
 
-STT_API_KEY = os.environ.get("STT_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_STT_API_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+# whisper-large-v3-turbo: same free-tier quota as whisper-large-v3 (20 RPM,
+# 2K req/day, 8h audio/day — see docs/DECISIONS.md) but faster; Groq's own
+# recommended default for most transcription use cases.
+GROQ_STT_MODEL = "whisper-large-v3-turbo"
+
+STT_API_KEY = os.environ.get("STT_API_KEY")  # optional fallback only
 STT_API_URL = "https://api.openai.com/v1/audio/transcriptions"
 STT_MODEL = "whisper-1"
 
@@ -34,25 +44,44 @@ LOW_AVG_LOGPROB_THRESHOLD = -1.0
 NO_SPEECH_PROB_THRESHOLD = 0.6
 
 
-def transcribe(path: str, language_override: str | None) -> dict:
-    """Returns {"language": str, "words": [...], "segments": [...]}."""
+def _transcribe_with(
+    api_url: str, api_key: str | None, model: str, path: str, language_override: str | None
+) -> dict:
     with open(path, "rb") as f:
         data = {
-            "model": STT_MODEL,
+            "model": model,
             "response_format": "verbose_json",
-            "timestamp_granularities[]": "word",
+            # Both granularities, not just "word" — Groq's endpoint returns
+            # `"segments": null` (no avg_logprob/no_speech_prob, which
+            # parse_transcription needs) when only "word" is requested;
+            # OpenAI's API returns segments either way, so this is safe for
+            # both providers.
+            "timestamp_granularities[]": ["word", "segment"],
         }
         if language_override:
             data["language"] = language_override
         resp = requests.post(
-            STT_API_URL,
-            headers={"Authorization": f"Bearer {STT_API_KEY}"},
+            api_url,
+            headers={"Authorization": f"Bearer {api_key}"},
             files={"file": f},
             data=data,
             timeout=600,
         )
     resp.raise_for_status()
-    return parse_transcription(resp.json())
+    return resp.json()
+
+
+def transcribe(path: str, language_override: str | None) -> dict:
+    """Returns {"language": str, "words": [...], "segments": [...]}. Tries
+    Groq first; falls back to OpenAI only if STT_API_KEY is set and Groq
+    raises (see module docstring)."""
+    try:
+        raw = _transcribe_with(GROQ_STT_API_URL, GROQ_API_KEY, GROQ_STT_MODEL, path, language_override)
+    except Exception:
+        if not STT_API_KEY:
+            raise
+        raw = _transcribe_with(STT_API_URL, STT_API_KEY, STT_MODEL, path, language_override)
+    return parse_transcription(raw)
 
 
 def parse_transcription(raw: dict) -> dict:

@@ -1,23 +1,22 @@
 import { NextResponse } from "next/server";
-import { google } from "@ai-sdk/google";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { clips, projects, transcripts, type TranscriptSegment } from "@/db/schema";
 import { chunkSegments } from "@/lib/detect-moments";
-import { generateJsonText } from "@/lib/llm-json";
+import { generateJsonTextWithFallback } from "@/lib/llm-json";
+import { TEXT_MODELS } from "@/lib/llm-models";
 import { selectClips, snapCandidate, type MomentCandidate } from "@/lib/moments";
-import { estimateGeminiCostUsd } from "@/lib/pricing";
+import { estimateCostUsdForProvider } from "@/lib/pricing";
 
 // Machine-to-machine route — the worker calls this (not a browser), so it's
 // authenticated with a shared secret instead of a Clerk session. Deliberately
 // outside the `/api/projects(.*)` matcher in proxy.ts.
 const WORKER_INTERNAL_SECRET = process.env.WORKER_INTERNAL_SECRET;
 
-// Gemini direct, via the user's own free-tier key — same reasoning and
-// model as translate-subtitles/shorten-text (see docs/DECISIONS.md): keep
-// everything on one free key rather than billing through AI Gateway.
-const DETECT_MODEL = google("gemini-3.8-flash");
+// Groq direct (primary) / Gemini direct (fallback) — same models as
+// translate-subtitles/shorten-text (see docs/DECISIONS.md): keep everything
+// on free user-supplied keys rather than billing through AI Gateway.
 
 // Mirrors the PRD §9 LLM moment-detection output schema exactly (field
 // names, not the app's camelCase — this is what the model is prompted for).
@@ -52,19 +51,17 @@ async function detectChunk(
 
   // Plain generateText + manual JSON parse, not generateObject — see
   // docs/DECISIONS.md (Gemini structured-output mode observed 503ing).
-  const { data, usage } = await generateJsonText(
-    {
-      model: DETECT_MODEL,
-      prompt: [
-        "You find short, self-contained, highly shareable moments in a video transcript for social clips (TikTok/Reels/Shorts).",
-        `Target clip length: ${clipLength}.`,
-        "Each candidate must have a clear hook, a complete thought, and a strong ending. Use the exact timestamps from the transcript below.",
-        "Score 0-100 overall plus sub-scores for hook, flow, value, trend.",
-        'Respond with ONLY a JSON object of this exact shape, no markdown fences, no other text: {"clips": [{"start": 0, "end": 0, "title": "...", "hashtags": ["..."], "score": 0, "sub_scores": {"hook": 0, "flow": 0, "value": 0, "trend": 0}, "reason": "..."}]}',
-        "Transcript (seconds):",
-        transcriptText,
-      ].join("\n\n"),
-    },
+  const { data, usage, model } = await generateJsonTextWithFallback(
+    TEXT_MODELS,
+    [
+      "You find short, self-contained, highly shareable moments in a video transcript for social clips (TikTok/Reels/Shorts).",
+      `Target clip length: ${clipLength}.`,
+      "Each candidate must have a clear hook, a complete thought, and a strong ending. Use the exact timestamps from the transcript below.",
+      "Score 0-100 overall plus sub-scores for hook, flow, value, trend.",
+      'Respond with ONLY a JSON object of this exact shape, no markdown fences, no other text: {"clips": [{"start": 0, "end": 0, "title": "...", "hashtags": ["..."], "score": 0, "sub_scores": {"hook": 0, "flow": 0, "value": 0, "trend": 0}, "reason": "..."}]}',
+      "Transcript (seconds):",
+      transcriptText,
+    ].join("\n\n"),
     responseSchema,
   );
 
@@ -78,7 +75,7 @@ async function detectChunk(
       subScores: c.sub_scores,
       reason: c.reason,
     })),
-    costUsd: estimateGeminiCostUsd(usage),
+    costUsd: estimateCostUsdForProvider(model.provider, usage),
   };
 }
 

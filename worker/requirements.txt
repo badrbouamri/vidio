@@ -4,3 +4,4 @@ yt-dlp==2025.9.26
 opencv-python-headless==5.0.0.93
 mediapipe==0.10.21
 numpy==1.26.4
+edge-tts==7.2.8
