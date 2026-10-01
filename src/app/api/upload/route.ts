@@ -21,6 +21,16 @@ import { ALLOWED_VIDEO_TYPES, MAX_UPLOAD_BYTES } from "@/lib/video-validation";
 // silently breaking `onUploadCompleted` so `storageKey` is never set and
 // /start forever reports "Upload has not completed yet", regardless of
 // file size. See docs/DECISIONS.md.
+//
+// This is NOT an open endpoint: `handleUpload` itself verifies every (2)
+// request's `x-vercel-signature` header — an HMAC-SHA256 over the request
+// body keyed with BLOB_READ_WRITE_TOKEN (a server secret the browser never
+// sees), timing-safe compared — and throws before `onUploadCompleted` ever
+// runs if it's missing or wrong (verified directly in
+// node_modules/@vercel/blob/dist/client.js). A caller without that token
+// cannot forge this callback. The `tokenPayload` it trusts (userId,
+// projectId) was itself only mintable by an authenticated, project-owning
+// user back in onBeforeGenerateToken below.
 export async function POST(req: Request) {
   const body = (await req.json()) as HandleUploadBody;
 
