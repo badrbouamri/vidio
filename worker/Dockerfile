@@ -1,5 +1,11 @@
 FROM python:3.11-slim
 
+# Unbuffered stdout/stderr — without this, Python fully buffers output when
+# it's not a TTY (always true in a container), so log.py's print()-based
+# structured logs (M8.2) can sit invisible in the buffer for a long time
+# instead of reaching the host's log stream in real time.
+ENV PYTHONUNBUFFERED=1
+
 # ffmpeg provides ffprobe (source validation, M2.4) and ffmpeg (rendering,
 # M4 — built with libass/libfribidi/libharfbuzz for subtitle burn-in + RTL).
 # libgl1/libglib2.0-0 satisfy opencv-python-headless's/mediapipe's runtime
