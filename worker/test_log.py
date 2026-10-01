@@ -1,4 +1,5 @@
 import json
+import uuid
 
 import log
 
@@ -33,3 +34,20 @@ def test_warn_goes_to_stderr(capsys):
     parsed = json.loads(err)
     assert parsed["level"] == "warn"
     assert parsed["note"] == "careful"
+
+
+def test_error_does_not_crash_on_uuid_fields(capsys):
+    """Regression: main.py's row dicts carry psycopg's uuid.UUID for
+    job_id/project_id/etc, not str — plain json.dumps() raises on those,
+    which previously took the *exception handler itself* down, crashing
+    the whole worker instead of just failing one job. See
+    docs/DECISIONS.md."""
+    job_id = uuid.uuid4()
+    try:
+        raise ValueError("boom")
+    except ValueError as exc:
+        log.error("test.failure", exc, job_id=job_id)
+
+    err = capsys.readouterr().err.strip()
+    parsed = json.loads(err)
+    assert parsed["job_id"] == str(job_id)

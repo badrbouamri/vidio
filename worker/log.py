@@ -11,8 +11,15 @@ from datetime import datetime, timezone
 
 
 def _line(level: str, event: str, **fields) -> str:
+    # default=str: callers often pass psycopg row values straight through
+    # (job_id, project_id, clip_id are uuid.UUID, not str) — without this,
+    # a single non-JSON-serializable field here raises and takes the
+    # exception handler calling log.error() down with it, crashing the
+    # whole worker instead of just failing the one job (see
+    # docs/DECISIONS.md).
     return json.dumps(
-        {"level": level, "event": event, "time": datetime.now(timezone.utc).isoformat(), **fields}
+        {"level": level, "event": event, "time": datetime.now(timezone.utc).isoformat(), **fields},
+        default=str,
     )
 
 

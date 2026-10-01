@@ -31,7 +31,11 @@ _YTDLP_ERROR_HINTS = [
 
 
 def source_dir(project_id: str) -> str:
-    path = os.path.join(STORAGE_DIR, project_id)
+    # project_id comes back from psycopg as a uuid.UUID, not a str, for
+    # every caller (main.py's row dicts never stringify it) — os.path.join
+    # rejects anything that isn't str/bytes/PathLike, so every ingest job
+    # crashed here before this fix, regardless of source type.
+    path = os.path.join(STORAGE_DIR, str(project_id))
     os.makedirs(path, exist_ok=True)
     return path
 
