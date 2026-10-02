@@ -10,6 +10,27 @@ from unittest.mock import MagicMock, patch
 import render
 
 
+def test_tail_meaningful_ffmpeg_stderr_drops_progress_spam():
+    """Regression: a render that crashes mid-encode leaves ffmpeg's repeated
+    `\\r`-separated "frame=... speed=..." progress updates as the literal
+    tail of stderr, burying the one-time error line that was logged before
+    encoding started — reproduced live against a real Railway render
+    failure, where the raised error showed only progress noise. See
+    docs/DECISIONS.md."""
+    stderr = (
+        "Unknown encoder 'libx265'\n"
+        "Error opening filters!\n"
+        "frame=   1 fps=0.0 q=0.0 size=0KiB time=N/A bitrate=N/A\r"
+        "frame=   2 fps=0.5 q=0.0 size=0KiB time=N/A bitrate=N/A\r"
+        "frame=   3 fps=1.0 q=0.0 size=0KiB time=N/A bitrate=N/A"
+    )
+
+    result = render._tail_meaningful_ffmpeg_stderr(stderr)
+
+    assert "Error opening filters!" in result
+    assert "frame=" not in result
+
+
 def _fake_outputs(tmp_path):
     paths = {}
     for key, name in [

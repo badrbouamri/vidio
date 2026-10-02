@@ -38,6 +38,18 @@ def _clip_relative(items: list[dict], start_s: float, key_pairs: list[tuple[str,
     return shifted
 
 
+def _tail_meaningful_ffmpeg_stderr(stderr: str, limit: int = 4000) -> str:
+    """ffmpeg writes its progress ("frame=... speed=...") as repeated `\\r`
+    updates with no trailing newline, so a crash partway through encoding
+    leaves that single giant progress "line" at the very end of stderr —
+    `stderr[-N:]` then returns only progress spam, hiding the real error
+    that was logged once, earlier. Split on both `\\r` and `\\n` and drop
+    progress lines before taking the tail, so the real cause survives."""
+    lines = stderr.replace("\r", "\n").split("\n")
+    meaningful = [line for line in lines if line.strip() and not line.lstrip().startswith("frame=")]
+    return "\n".join(meaningful)[-limit:]
+
+
 def render_clip(
     source_path: str,
     clip: dict,
@@ -122,7 +134,10 @@ def render_clip(
     )
     result = subprocess.run(render_args, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg render failed: {result.stderr[-2000:]}")
+        raise RuntimeError(
+            f"ffmpeg render failed (exit {result.returncode}): "
+            f"{_tail_meaningful_ffmpeg_stderr(result.stderr)}"
+        )
 
     thumb_path = os.path.join(work_dir, f"{clip['id']}_thumb.jpg")
     thumb_at = min(1.0, (end_s - start_s) / 2)
