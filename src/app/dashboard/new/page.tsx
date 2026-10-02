@@ -16,17 +16,35 @@ import type { ProjectOptions } from "@/db/schema";
 // Edge case §11: "Very long source → reject before upload finishes (check
 // metadata client-side where possible)." Reads only the <video> element's
 // metadata (duration), not the full file — fast, no full decode/download.
+// A hard timeout guards against browsers that never fire loadedmetadata/error
+// for an off-DOM <video> element (observed in practice) — without it, the
+// whole submit flow hangs forever with no feedback to the user.
+const VIDEO_METADATA_TIMEOUT_MS = 5000;
+
 function readVideoDurationS(file: File): Promise<number> {
   return new Promise((resolve, reject) => {
     const video = document.createElement("video");
     video.preload = "metadata";
     const url = URL.createObjectURL(file);
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      URL.revokeObjectURL(url);
+      reject(new Error("Timed out reading video metadata."));
+    }, VIDEO_METADATA_TIMEOUT_MS);
     video.src = url;
     video.onloadedmetadata = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       URL.revokeObjectURL(url);
       resolve(video.duration);
     };
     video.onerror = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       URL.revokeObjectURL(url);
       reject(new Error("Could not read video metadata."));
     };
