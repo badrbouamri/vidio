@@ -51,6 +51,27 @@ function readVideoDurationS(file: File): Promise<number> {
   });
 }
 
+// The client's upload() call resolves as soon as the PUT to Blob storage
+// finishes — but `projects.storageKey` is only set afterwards, by Vercel's
+// separate `onUploadCompleted` webhook. Calling /start immediately races
+// that webhook (reproduced live: "Upload has not completed yet." even
+// though the upload genuinely succeeded). Poll briefly for the webhook to
+// land before giving up and calling /start anyway.
+async function waitForStorageKey(
+  projectId: string,
+  { timeoutMs = 15000, intervalMs = 1000 } = {},
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const res = await fetch(`/api/projects/${projectId}`);
+    if (res.ok) {
+      const { project } = await res.json();
+      if (project.storageKey) return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 // UI screen 4 (PRD §10) / §4 steps 2-3: upload or YouTube URL + options.
 export default function NewProjectPage() {
   const router = useRouter();
@@ -142,6 +163,7 @@ export default function NewProjectPage() {
           multipart: true,
           onUploadProgress: ({ percentage }) => setProgress(percentage),
         });
+        await waitForStorageKey(project.id);
       }
 
       const startRes = await fetch(`/api/projects/${project.id}/start`, {
