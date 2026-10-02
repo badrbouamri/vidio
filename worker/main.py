@@ -104,7 +104,7 @@ def trigger_internal_route(path: str, project_id: str, fallback_error: str, time
     resp = requests.post(
         f"{APP_BASE_URL}{path}",
         headers={"x-worker-secret": WORKER_INTERNAL_SECRET},
-        json={"projectId": project_id},
+        json={"projectId": str(project_id)},
         timeout=timeout,
     )
     if resp.status_code >= 400:
