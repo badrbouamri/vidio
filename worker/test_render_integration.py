@@ -107,6 +107,29 @@ class TestOutputSpecCompliance:
         with open(outputs["vtt_path"], encoding="utf-8") as f:
             assert "WEBVTT" in f.read()
 
+    def test_render_clip_srt_includes_a_segment_that_starts_before_the_clip(
+        self, synthetic_16x9, tmp_path
+    ):
+        """Regression: reproduced live against a real clip — a transcript
+        segment that starts before the clip's own start_s but overlaps it
+        (Whisper segments are phrase-length; clip boundaries are snapped
+        independently by moment-detection) was dropped entirely by a
+        start-containment filter, producing a 0-byte SRT even though the
+        clip had real speech throughout. See docs/DECISIONS.md."""
+        clip = {"id": "overlap-clip", "start_s": 2.0, "end_s": 4.0}
+        transcript = {
+            "words": [{"word": "Hi", "start": 2.2, "end": 2.5}],
+            # Starts before start_s=2.0, ends after it -> overlaps the clip.
+            "segments": [{"start": 1.0, "end": 3.0, "text": "Hi there"}],
+        }
+        outputs = render.render_clip(synthetic_16x9, clip, transcript, str(tmp_path))
+
+        with open(outputs["srt_path"], encoding="utf-8") as f:
+            srt_content = f.read()
+        assert "Hi there" in srt_content
+        with open(outputs["vtt_path"], encoding="utf-8") as f:
+            assert "Hi there" in f.read()
+
 
 @pytest.mark.skipif(not CV2_AVAILABLE, reason="opencv not installed")
 class TestKaraokeAndRtlRendering:

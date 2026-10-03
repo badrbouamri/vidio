@@ -79,8 +79,19 @@ def render_clip(
     source_w, source_h = probe.width, probe.height
     start_s, end_s = clip["start_s"], clip["end_s"]
 
-    words_abs = [w for w in transcript["words"] if start_s <= w["start"] < end_s]
-    segments_abs = [s for s in transcript["segments"] if start_s <= s["start"] < end_s]
+    # Overlap, not "starts inside the clip": a transcript segment can start
+    # before the clip's own start_s and still cover most of it (Whisper
+    # segments are phrase-length, clip boundaries are snapped independently
+    # by moment-detection) — filtering on start-containment alone silently
+    # dropped such segments entirely, producing an empty SRT/VTT export even
+    # though the clip had real speech throughout. Reproduced live: a 7s clip
+    # exported a 0-byte .srt. _clip_relative's downstream time formatters
+    # (_srt_time/_seconds_to_ass_time) already clamp negative starts to 0,
+    # so a word/segment that began before the clip is safe to include.
+    words_abs = [w for w in transcript["words"] if w["end"] > start_s and w["start"] < end_s]
+    segments_abs = [
+        s for s in transcript["segments"] if s["end"] > start_s and s["start"] < end_s
+    ]
     words_rel = _clip_relative(words_abs, start_s, ["start", "end"])
     segments_rel = _clip_relative(segments_abs, start_s, ["start", "end"])
 
