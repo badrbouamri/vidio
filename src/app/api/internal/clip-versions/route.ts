@@ -4,6 +4,7 @@ import { put } from "@vercel/blob";
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { clips, clipVersions } from "@/db/schema";
+import { PRIVATE_BLOB_TOKEN } from "@/lib/blob";
 
 // Machine-to-machine route — the worker uploads a rendered clip's outputs
 // here once per clip (M4). This is the only place that touches Vercel Blob
@@ -70,12 +71,13 @@ export async function POST(req: Request) {
   const prefix = `clips/${clipId}/${versionKey}`;
 
   const [videoBlob, srtBlob, vttBlob, thumbnailBlob] = await Promise.all([
-    put(`${prefix}/video.mp4`, video, { access: "private", addRandomSuffix: false }),
-    put(`${prefix}/subtitles.srt`, srt, { access: "private", addRandomSuffix: false }),
-    put(`${prefix}/subtitles.vtt`, vtt, { access: "private", addRandomSuffix: false }),
+    put(`${prefix}/video.mp4`, video, { access: "private", addRandomSuffix: false, token: PRIVATE_BLOB_TOKEN }),
+    put(`${prefix}/subtitles.srt`, srt, { access: "private", addRandomSuffix: false, token: PRIVATE_BLOB_TOKEN }),
+    put(`${prefix}/subtitles.vtt`, vtt, { access: "private", addRandomSuffix: false, token: PRIVATE_BLOB_TOKEN }),
     // Thumbnails are just previews, not a download-with-audit-trail
     // requirement, so they stay public — simpler (no signed URL needed to
-    // render the gallery) and lower-value to protect.
+    // render the gallery) and lower-value to protect. Public store (default
+    // BLOB_READ_WRITE_TOKEN) is fine for these.
     put(`${prefix}/thumbnail.jpg`, thumbnail, { access: "public", addRandomSuffix: false }),
   ]);
 

@@ -6,6 +6,7 @@ import JSZip from "jszip";
 import { getDb } from "@/db";
 import { clips, clipVersions, projects } from "@/db/schema";
 import { requireUserId } from "@/lib/auth";
+import { PRIVATE_BLOB_TOKEN } from "@/lib/blob";
 import { DOWNLOAD_TOKEN_TTL_MS, signDownloadToken } from "@/lib/download-tokens";
 import { uniqueZipFilename } from "@/lib/export";
 
@@ -57,7 +58,7 @@ export async function POST(req: Request) {
     const version = versions.find((v) => v.id === clip.currentVersionId);
     if (!version?.videoKey) continue;
 
-    const blob = await get(version.videoKey, { access: "private" });
+    const blob = await get(version.videoKey, { access: "private", token: PRIVATE_BLOB_TOKEN });
     if (!blob || blob.statusCode !== 200) continue;
     const bytes = await new Response(blob.stream).arrayBuffer();
 
@@ -78,6 +79,7 @@ export async function POST(req: Request) {
     access: "private",
     addRandomSuffix: false,
     contentType: "application/zip",
+    token: PRIVATE_BLOB_TOKEN,
   });
 
   const exp = Date.now() + DOWNLOAD_TOKEN_TTL_MS;

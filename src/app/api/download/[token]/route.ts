@@ -3,6 +3,7 @@ import { get } from "@vercel/blob";
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { clipVersions } from "@/db/schema";
+import { PRIVATE_BLOB_TOKEN } from "@/lib/blob";
 import { verifyDownloadToken, type Disposition, type DownloadKind } from "@/lib/download-tokens";
 
 const CONTENT_TYPES: Record<DownloadKind, string> = {
@@ -18,7 +19,7 @@ async function streamBlob(
   filename: string,
   disposition: Disposition = "attachment",
 ) {
-  const blob = await get(key, { access: "private" });
+  const blob = await get(key, { access: "private", token: PRIVATE_BLOB_TOKEN });
   if (!blob || blob.statusCode !== 200) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
