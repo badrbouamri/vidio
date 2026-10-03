@@ -13,12 +13,14 @@ Railway/Fly.io per PRD §7).
 
 import json
 import os
+import shutil
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import psycopg
 import requests
 
+import blob_client
 import dub
 import ffmpeg_filters
 import ingest
@@ -65,7 +67,8 @@ def run_ingest(conn, job, project) -> None:
 
 def run_transcribe(conn, job, project) -> None:
     """M3.1-M3.4: STT with word timestamps; persist transcript (FR-8, FR-9, FR-11)."""
-    path = ingest.local_source_path(project)
+    work_dir = ingest.source_dir(project["id"])
+    path = ingest.download_source(project, work_dir)
     language_override = (project["options"] or {}).get("sourceLanguage")
     result = transcribe.transcribe(path, language_override)
 
@@ -145,7 +148,8 @@ def run_render(conn, job, project) -> None:
         cur.execute(
             """
             SELECT id, start_s, end_s, subtitle_style, subtitle_words,
-                   audio_preference, subtitle_lang_preference, translated_segments
+                   audio_preference, subtitle_lang_preference, translated_segments,
+                   dub_audio_key
             FROM clips WHERE project_id = %s AND status IN ('pending', 'failed')
             """,
             (project["id"],),
@@ -160,6 +164,7 @@ def run_render(conn, job, project) -> None:
                 "audio_preference": row[5],
                 "subtitle_lang_preference": row[6],
                 "translated_segments": row[7],
+                "dub_audio_key": row[8],
             }
             for row in cur.fetchall()
         ]
@@ -178,7 +183,7 @@ def run_render(conn, job, project) -> None:
 
     default_style = (project["options"] or {}).get("subtitleStyle") or render.DEFAULT_STYLE
     work_dir = ingest.source_dir(project["id"])
-    source_path = ingest.local_source_path(project)
+    source_path = ingest.download_source(project, work_dir)
 
     # M7.5: resolution cap + watermark depend on the owner's plan.
     with conn.cursor() as cur:
@@ -202,10 +207,16 @@ def run_render(conn, job, project) -> None:
             transcript = {"words": words, "segments": transcript_segments}
 
             # M6.4: audio/subtitle-language toggles set via the clip editor.
+            # dub_audio_key (persisted by run_dub, below) is the stateless
+            # replacement for the old "check if a local file exists" test —
+            # this container may never have run the dub stage at all.
             audio_source = clip["audio_preference"] or "original"
-            dub_path = dub.dub_track_path(clip["id"], work_dir) if audio_source == "dubbed" else None
-            if dub_path and not os.path.exists(dub_path):
-                dub_path = None  # not prepared yet (dub stage hasn't run/finished) — fall back
+            dub_path = None
+            if audio_source == "dubbed" and clip["dub_audio_key"]:
+                dub_path = os.path.join(work_dir, f"{clip['id']}_dub.wav")
+                blob_client.download(clip["dub_audio_key"], dub_path)
+            # else: dub stage hasn't run/finished for this clip yet — fall
+            # back to original audio (dub_path stays None).
 
             outputs = render.render_clip(
                 source_path,
@@ -258,21 +269,28 @@ def run_translate(conn, job, project) -> None:
 
 
 def run_dub(conn, job, project) -> None:
-    """M6.2/M6.3: TTS dubbing (FR-26). Prepares (generates + locally caches)
-    a dubbed audio track per ready clip; does NOT create new ClipVersions —
-    the user picks "dubbed" audio in the clip editor and re-renders (M6.4,
-    reusing the M5 render endpoint) when they actually want it burned in."""
+    """M6.2/M6.3: TTS dubbing (FR-26). Builds a dubbed audio track per ready
+    clip and uploads it to the private Blob store, persisting the key on
+    the clip row; does NOT create new ClipVersions — the user picks
+    "dubbed" audio in the clip editor and re-renders (M6.4, reusing the M5
+    render endpoint) when they actually want it burned in."""
     if not (project["options"] or {}).get("dubbingEnabled"):
         return
 
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, start_s, end_s, translated_segments FROM clips "
+            "SELECT id, start_s, end_s, translated_segments, dub_audio_key FROM clips "
             "WHERE project_id = %s AND status = 'ready'",
             (project["id"],),
         )
         ready_clips = [
-            {"id": row[0], "start_s": row[1], "end_s": row[2], "translated_segments": row[3]}
+            {
+                "id": row[0],
+                "start_s": row[1],
+                "end_s": row[2],
+                "translated_segments": row[3],
+                "dub_audio_key": row[4],
+            }
             for row in cur.fetchall()
         ]
 
@@ -285,11 +303,25 @@ def run_dub(conn, job, project) -> None:
 
     succeeded = 0
     for clip in ready_clips:
+        if clip["dub_audio_key"]:
+            succeeded += 1
+            continue  # already built — e.g. a resumed job after a requeue
         segments = clip["translated_segments"]
         if not segments:
             continue  # translate stage hasn't produced text for this clip yet
         try:
-            dub.build_dub_track(clip, segments, target_language, work_dir, allow_voice_cloning=can_clone)
+            local_path = dub.build_dub_track(
+                clip, segments, target_language, work_dir, allow_voice_cloning=can_clone
+            )
+            dub_audio_key = blob_client.upload(
+                f"dub-audio/{clip['id']}.wav", local_path, "audio/wav"
+            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE clips SET dub_audio_key = %s WHERE id = %s",
+                    (dub_audio_key, clip["id"]),
+                )
+            conn.commit()
             succeeded += 1
 
             # M7.2: dubbing consumes extra credits (FR-42), separate from
@@ -403,6 +435,54 @@ def process_job(conn, job):
     except Exception as exc:  # noqa: BLE001 - report any stage failure, retried via FR-38
         log.error("job.stage_failed", exc, job_id=job["id"], project_id=project["id"], stage=job["stage"])
         mark_failed(conn, job, project, str(exc))
+    finally:
+        # Stateless-worker refactor: every stage's scratch files (downloaded
+        # source, intermediate ffmpeg outputs) are purely transient within
+        # this one process_job call now — nothing later reads them off
+        # local disk, so there's nothing to gain by keeping them around
+        # (and real cost in unbounded disk growth across a long-lived
+        # container processing many projects). See docs/DECISIONS.md.
+        shutil.rmtree(ingest.source_dir(project["id"]), ignore_errors=True)
+
+
+STUCK_JOB_TIMEOUT_S = 10 * 60
+
+
+def requeue_stuck_jobs(conn) -> list[tuple]:
+    """Crash recovery for a worker with no persistent disk (no Railway
+    volume): if this process starts up and finds a job still marked
+    'running' from — by definition — a *previous* process (claim_next_job's
+    FOR UPDATE SKIP LOCKED means only one worker instance ever holds a
+    given job, and this architecture assumes a single instance, per
+    docs/DECISIONS.md), that previous process is gone and the job is
+    orphaned. Only requeues jobs stuck longer than STUCK_JOB_TIMEOUT_S, so a
+    job that's still genuinely running *in this same startup* (impossible
+    today, since this only runs once before the poll loop begins) or a
+    container that restarts within the window isn't double-processed.
+    Also resets the project's status out of 'processing' so the UI doesn't
+    show a stale "running" stage with nothing actually running."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=STUCK_JOB_TIMEOUT_S)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE jobs SET status = 'queued', started_at = NULL
+            WHERE status = 'running' AND started_at < %s
+            RETURNING id, project_id, stage
+            """,
+            (cutoff,),
+        )
+        rows = cur.fetchall()
+        if rows:
+            project_ids = [row[1] for row in rows]
+            cur.execute(
+                "UPDATE projects SET status = 'queued' "
+                "WHERE id = ANY(%s) AND status = 'processing'",
+                (project_ids,),
+            )
+    conn.commit()
+    for job_id, project_id, stage in rows:
+        log.info("job.requeued", job_id=job_id, project_id=project_id, stage=stage)
+    return rows
 
 
 RETENTION_SWEEP_INTERVAL_S = 60 * 60  # M8.4: once an hour is plenty
@@ -412,6 +492,7 @@ def main():
     log.info("worker.started", poll_interval_s=POLL_INTERVAL_S)
     last_retention_sweep = 0.0
     with psycopg.connect(DATABASE_URL, autocommit=False) as conn:
+        requeue_stuck_jobs(conn)
         while True:
             job = claim_next_job(conn)
             if job:

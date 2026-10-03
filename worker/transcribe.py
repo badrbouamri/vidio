@@ -47,10 +47,9 @@ NO_SPEECH_PROB_THRESHOLD = 0.6
 
 def _extract_audio(source_path: str) -> str:
     """Both STT providers reject the file by filename extension, not
-    content — and the ingest stage stores uploaded sources as a bare
-    `source` file with NO extension at all (ingest.py's
-    local_source_path), which Groq flat-out rejects
-    (`unsupported_audio_format`). Worse, MOV/MKV (both allowed upload
+    content — and an "upload" source downloads as a bare `source` file with
+    NO extension at all (ingest.py's download_upload), which Groq flat-out
+    rejects (`unsupported_audio_format`). Worse, MOV/MKV (both allowed upload
     types, see src/lib/video-validation.ts) aren't in either provider's
     accepted-extension list at all even when correctly named. Fixed by
     always extracting to a real, universally-accepted container first —

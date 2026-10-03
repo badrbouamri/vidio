@@ -145,6 +145,12 @@ export const clips = pgTable("clips", {
   subtitleLangPreference: subtitleLangPrefEnum("subtitle_lang_preference")
     .notNull()
     .default("original"),
+  // Stateless-worker refactor: the dub stage uploads its built track to the
+  // private Blob store (worker/blob_client.py) and persists the key here,
+  // instead of a local worker-disk path (worker/dub.py's old
+  // dub_track_path) — the render stage then downloads it fresh by key.
+  // Also lets a requeued/resumed dub stage skip clips already done.
+  dubAudioKey: text("dub_audio_key"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

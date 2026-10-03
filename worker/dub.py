@@ -5,8 +5,10 @@ Prepares a dubbed audio track per clip: TTS each translated segment, fit it
 to the segment's original duration (stretch up to 1.25x, else ask for a
 shorter translation and retry — edge case §11), then assemble all segments
 into one clip-length track (ffmpeg_filters.py's adelay/amix). Does not
-create a ClipVersion itself — render.py picks the cached track up when a
-clip's `audio_preference` is "dubbed" (M6.4).
+create a ClipVersion itself — main.py's run_dub uploads the built track to
+the private Blob store and persists its key on the clip row; render.py
+downloads it fresh by key when a clip's `audio_preference` is "dubbed"
+(M6.4) — see docs/DECISIONS.md's stateless-worker refactor.
 
 Voice cloning (FR-26 assumption) is gated but not actually implemented —
 see can_use_voice_cloning and docs/DECISIONS.md.
@@ -200,9 +202,3 @@ def build_dub_track(
     if result.returncode != 0:
         raise ValidationError(f"Dub audio assembly failed: {result.stderr[-500:]}")
     return dub_path
-
-
-def dub_track_path(clip_id: str, work_dir: str) -> str:
-    """Where build_dub_track cached this clip's dub audio — used by
-    render.py to find it without regenerating."""
-    return os.path.join(work_dir, f"{clip_id}_dub.wav")

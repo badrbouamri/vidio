@@ -1,13 +1,18 @@
 """
-M2.3/M2.4: ingest stage — get the source file onto local disk, validate it,
-extract duration.
+M2.3/M2.4: ingest stage — get the source file, validate it, extract duration.
 
-Source files stay in the worker's own storage (see docs/DECISIONS.md —
-"worker-local source storage"): only rendered clip outputs (M4/M5) need to be
-browser-downloadable, so the raw source never needs to touch Vercel Blob.
+Stateless-worker refactor (see docs/DECISIONS.md): the worker has no
+persistent disk between stages or container restarts (no Railway volume).
+Every stage downloads the source fresh into its own scratch dir
+(`source_dir`, wiped after the stage by main.py's process_job) rather than
+assuming a file left by a previous stage/process is still there.
+
 Uploads are already reachable at `project.storage_key` (a public Blob URL,
-set by /api/upload); this just downloads them locally for ffprobe/ffmpeg.
-YouTube sources are downloaded here for the first time.
+set by /api/upload) — any stage can fetch that directly. YouTube sources are
+downloaded here (ingest) for the first time via yt-dlp, then immediately
+uploaded to the private Blob store (blob_client.py) so `storage_key` becomes
+a private-store key every later stage can re-fetch the same way, instead of
+a local path that only this one container/process could see.
 """
 
 import json
@@ -17,6 +22,7 @@ import subprocess
 import requests
 import yt_dlp
 
+import blob_client
 from validation import ValidationError, parse_ffprobe, validate_probe
 
 STORAGE_DIR = os.environ.get("WORKER_STORAGE_DIR", "/data/nabd")
@@ -40,13 +46,16 @@ def source_dir(project_id: str) -> str:
     return path
 
 
-def local_source_path(project: dict) -> str:
-    """Where the ingest stage put this project's source file on local disk
-    (see docs/DECISIONS.md — "worker-local source storage"). Later stages
-    (transcribe, render) read from here instead of re-downloading."""
+def download_source(project: dict, dest_dir: str) -> str:
+    """Downloads this project's source into dest_dir — called fresh by every
+    stage that needs it (transcribe, render), not just ingest, since no
+    local file survives between stages/container restarts. "upload" sources
+    are a public Blob URL (set by /api/upload); "youtube" sources are a
+    private-store key (set by run_ingest, below, after yt-dlp)."""
     if project["source_type"] == "upload":
-        return os.path.join(source_dir(project["id"]), "source")
-    return project["storage_key"]  # youtube: local path saved by run_ingest
+        return download_upload(project["storage_key"], dest_dir)
+    dest = os.path.join(dest_dir, "source.mp4")
+    return blob_client.download(project["storage_key"], dest)
 
 
 def download_upload(storage_key: str, dest_dir: str) -> str:
@@ -109,7 +118,12 @@ def run(project: dict) -> dict:
         storage_key = project["storage_key"]
     else:
         path = download_youtube(project["source_url"], dest_dir)
-        storage_key = path
+        # Uploaded immediately so storage_key is a Blob key every later
+        # stage can re-fetch (download_source, above) regardless of which
+        # container ends up running them — see module docstring.
+        storage_key = blob_client.upload(
+            f"sources/{project['id']}/source.mp4", path, "video/mp4"
+        )
 
     info = probe(path)
     validate_probe(info)

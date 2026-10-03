@@ -36,3 +36,65 @@ def test_trigger_internal_route_accepts_a_uuid_project_id(monkeypatch):
 
     assert result == {"ok": True}
     assert captured["json"] == {"projectId": str(project_id)}
+
+
+class _FakeCursor:
+    def __init__(self, fetchall_results):
+        self._fetchall_results = fetchall_results
+        self.executed = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.executed.append((" ".join(sql.split()), params))
+
+    def fetchall(self):
+        return self._fetchall_results.pop(0)
+
+
+class _FakeConn:
+    def __init__(self, fetchall_results):
+        self._fetchall_results = fetchall_results
+        self.committed = False
+        self.cursors = []
+
+    def cursor(self):
+        cur = _FakeCursor(self._fetchall_results)
+        self.cursors.append(cur)
+        return cur
+
+    def commit(self):
+        self.committed = True
+
+
+def test_requeue_stuck_jobs_requeues_running_jobs_past_the_timeout():
+    """Crash recovery for the stateless worker (no Railway volume, no local
+    state survives a container restart): a job left 'running' from a
+    previous process is orphaned and must be requeued on startup so the
+    pipeline actually resumes instead of hanging forever."""
+    job_id, project_id = uuid.uuid4(), uuid.uuid4()
+    conn = _FakeConn(fetchall_results=[[(job_id, project_id, "render")]])
+
+    rows = main.requeue_stuck_jobs(conn)
+
+    assert rows == [(job_id, project_id, "render")]
+    assert conn.committed
+    jobs_sql, jobs_params = conn.cursors[0].executed[0]
+    assert "UPDATE jobs SET status = 'queued'" in jobs_sql
+    assert "WHERE status = 'running' AND started_at <" in jobs_sql
+    projects_sql, projects_params = conn.cursors[0].executed[1]
+    assert "UPDATE projects SET status = 'queued'" in projects_sql
+    assert projects_params == ([project_id],)
+
+
+def test_requeue_stuck_jobs_skips_the_projects_update_when_nothing_is_stuck():
+    conn = _FakeConn(fetchall_results=[[]])
+
+    rows = main.requeue_stuck_jobs(conn)
+
+    assert rows == []
+    assert len(conn.cursors[0].executed) == 1  # no projects UPDATE issued
