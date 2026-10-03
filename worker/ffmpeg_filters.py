@@ -155,6 +155,14 @@ def build_render_args(
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-b:a", "128k",
+        # Reproduced live: a render was SIGKILLed (exit -9, almost certainly
+        # the OOM killer) on Railway's worker host. ffmpeg's default thread
+        # count is autodetected from the *host's* reported CPU count, not
+        # the container's actual cgroup-limited share — logs showed
+        # libx264 using "threads=40" on a small container, and each thread
+        # allocates its own lookahead buffers. Capping threads bounds that
+        # memory use; a short social-clip render doesn't need more anyway.
+        "-threads", "2",
         output_path,
     ]
     return args
