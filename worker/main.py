@@ -132,14 +132,21 @@ def run_detect(conn, job, project) -> None:
 
 def run_render(conn, job, project) -> None:
     """M4: FFmpeg cut + reframe + subtitles (FR-17..FR-24). Renders every
-    pending clip for the project; a per-clip failure doesn't fail the whole
-    stage unless every clip fails."""
+    not-yet-ready clip for the project; a per-clip failure doesn't fail the
+    whole stage unless every clip fails.
+
+    Includes 'failed' alongside 'pending': a project-level stage retry (the
+    dashboard's Retry button, POST /api/projects/:id/start) just re-queues
+    this job stage without touching clip rows — restricting the query to
+    'pending' only meant retrying after a render failure found zero rows to
+    render, silently "succeeded", and advanced the pipeline with the clip
+    permanently stuck at 'failed'. Reproduced live. See docs/DECISIONS.md."""
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT id, start_s, end_s, subtitle_style, subtitle_words,
                    audio_preference, subtitle_lang_preference, translated_segments
-            FROM clips WHERE project_id = %s AND status = 'pending'
+            FROM clips WHERE project_id = %s AND status IN ('pending', 'failed')
             """,
             (project["id"],),
         )
